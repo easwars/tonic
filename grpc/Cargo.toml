@@ -1,0 +1,13 @@
+[package]
+name = "grpc"
+version = "0.9.0"
+edition = "2021"
+authors = ["gRPC Authors"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+once_cell = "1.19.0"
+tokio = { version = "1.37.0", features = ["full"] }
+tonic = "0.11.0"
+url = "2.5.0"
