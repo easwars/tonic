@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use std::{collections::HashMap, error::Error, future::Future, sync::Arc};
+use std::{collections::HashMap, error::Error, sync::Arc};
 use tonic::metadata::MetadataMap;
 
 use crate::service::{Request, Response};
@@ -11,7 +11,7 @@ pub struct TODO;
 /// A registry to store and retrieve LB policies.  LB policies are indexed by
 /// their names.
 pub struct Registry<'a> {
-    m: HashMap<String, &'a (dyn Builder + Sync + Send)>,
+    m: HashMap<String, &'a (dyn Builder)>,
 }
 
 impl<'a> Registry<'a> {
@@ -20,14 +20,11 @@ impl<'a> Registry<'a> {
         Self { m: HashMap::new() }
     }
     /// Add a LB policy into the registry.
-    pub fn add_builder<B: Builder + Send + Sync>(&mut self, builder: &'a B) {
+    pub fn add_builder(&mut self, builder: &'a impl Builder) {
         self.m.insert(builder.name().to_string(), builder);
     }
     /// Retrieve a LB policy from the registry, or None if not found.
-    pub fn get_policy(
-        &self,
-        name: &str,
-    ) -> Option<&(dyn Builder + Send + Sync)> {
+    pub fn get_policy(&self, name: &str) -> Option<&(dyn Builder)> {
         self.m.get(name).and_then(|&f| Some(f))
     }
 }
@@ -38,26 +35,23 @@ pub static GLOBAL_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
 
 pub trait Subchannel {
     /// Begins connecting the subchannel.
-    fn connect(&self) -> Box<dyn Future<Output = ()> + Send + Sync>;
+    fn connect(&self);
 }
 
 /// This channel is a set of features the LB policy may use from the channel.
 pub trait Channel {
     /// Creates a new subchannel in idle state.
-    fn new_subchannel(
-        &self,
-        address: Address,
-    ) -> Result<Arc<dyn Subchannel>, Box<dyn Error>>;
+    fn new_subchannel(&self, address: Address) -> Result<Arc<dyn Subchannel>, Box<dyn Error>>;
     /// Consumes an update from the LB Policy.
     fn update_state(&self, update: Update);
 }
 
 /// An LB policy factory
-pub trait Builder {
+pub trait Builder: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
     fn build(
         &self,
-        channel: Box<dyn Channel>,
+        channel: Arc<dyn Channel>,
         options: TODO,
     ) -> Result<Box<dyn Policy>, Box<dyn Error>>;
     /// Reports the name of the LB Policy.

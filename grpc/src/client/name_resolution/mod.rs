@@ -9,7 +9,7 @@ pub struct TODO;
 /// A registry to store and retrieve name resolvers.  Resolvers are indexed by
 /// the URI scheme they are intended to handle.
 pub struct Registry<'a> {
-    m: HashMap<String, &'a (dyn Builder + Sync + Send)>,
+    m: HashMap<String, &'a (dyn Builder)>,
 }
 
 impl<'a> Registry<'a> {
@@ -18,14 +18,11 @@ impl<'a> Registry<'a> {
         Self { m: HashMap::new() }
     }
     /// Add a name resolver into the registry.
-    pub fn add_builder<B: Builder + Send + Sync>(&mut self, builder: &'a B) {
+    pub fn add_builder(&mut self, builder: &'a impl Builder) {
         self.m.insert(builder.scheme().to_string(), builder);
     }
     /// Retrieve a name resolver from the registry, or None if not found.
-    pub fn get_scheme(
-        &self,
-        name: &str,
-    ) -> Option<&(dyn Builder + Send + Sync)> {
+    pub fn get_scheme(&self, name: &str) -> Option<&(dyn Builder)> {
         self.m.get(name).and_then(|&f| Some(f))
     }
 }
@@ -35,14 +32,14 @@ impl<'a> Registry<'a> {
 pub static GLOBAL_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
 
 /// This channel is a set of features the name resolver may use from the channel.
-pub trait Channel {
+pub trait Channel: Send + Sync {
     fn parse_service_config(&self, config: String) -> TODO;
     /// Consumes an update from the name resolver.
     fn update(&self, update: Update);
 }
 
 /// A name resolver factory
-pub trait Builder {
+pub trait Builder: Send + Sync {
     /// Builds a name resolver instance, or returns an error.
     fn build(
         &self,
@@ -74,7 +71,7 @@ pub struct Address {
     address: String,
     // Specifies the transport that should be used with this address.
     address_type: String,
-    // Contains optional data which can be used by the Subchannel.
+    // Contains optional data which can be used by the Subchannel or transport.
     attributes: Attributes,
 }
 
