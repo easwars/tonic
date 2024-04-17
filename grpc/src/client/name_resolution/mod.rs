@@ -74,12 +74,12 @@ pub struct Address {
     // Contains optional data which can be used by the Subchannel or transport.
     attributes: Attributes,
 
-    // OR
+    // OR instead of address + address_type:
     address_alt_form: Box<dyn Any>,
 }
 
 // Example of an address:
-pub struct IpAddress {
+pub struct TcpIpAddress {
     address: IpAddr, // or String?
 }
 // Then a registry of address types and which transport should handle that address type.
