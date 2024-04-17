@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use std::{collections::HashMap, error::Error};
+use std::{any::Any, collections::HashMap, error::Error, net::IpAddr};
 use url::Url;
 
 use crate::attributes::Attributes;
@@ -73,7 +73,16 @@ pub struct Address {
     address_type: String,
     // Contains optional data which can be used by the Subchannel or transport.
     attributes: Attributes,
+
+    // OR
+    address_alt_form: Box<dyn Any>,
 }
+
+// Example of an address:
+pub struct IpAddress {
+    address: IpAddr, // or String?
+}
+// Then a registry of address types and which transport should handle that address type.
 
 pub trait Resolver {
     fn resolve_now(&self);
