@@ -1,12 +1,20 @@
 use std::error::Error;
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::vec;
+
+use http::Uri;
+use tokio::sync::mpsc;
+use tonic::async_trait;
 
 use crate::attributes::Attributes;
 use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
+
+use super::load_balancing::GLOBAL_REGISTRY;
+use super::name_resolution;
 
 #[non_exhaustive]
 pub struct ChannelOptions<'a> {
@@ -19,8 +27,9 @@ pub struct ChannelOptions<'a> {
     pub disable_health_checks: bool,
     pub max_retry_memory: u32, // ?
     pub idle_timeout: Duration,
+    pub transport_registry: Option<super::transport::Registry>,
     pub name_resolver_registry: Option<super::load_balancing::Registry<'a>>,
-    pub lb_policy_registry: Option<super::name_resolution::Registry<'a>>,
+    pub lb_policy_registry: Option<super::name_resolution::Registry>,
 
     // Typically we allow settings at the channel level that impact all RPCs,
     // but can also be set per-RPC.  E.g.s:
@@ -56,6 +65,7 @@ impl<'a> Default for ChannelOptions<'a> {
             name_resolver_registry: None,
             lb_policy_registry: None,
             default_request_extensions: vec![],
+            transport_registry: None,
         }
     }
 }
@@ -76,10 +86,11 @@ impl<'a> ChannelOptions<'a> {
 // All of Channel needs to be thread-safe.  Arc<inner>?  Or give out
 // Arc<Channel> from constructor?
 pub struct Channel {
+    uri: Uri,
     cur_state: Mutex<ConnectivityState>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum ConnectivityState {
     Idle,
     Connecting,
@@ -94,11 +105,12 @@ impl Channel {
     // are not in ChannelOptions.
     pub fn new(
         target: &str,
-        credentials: impl Credentials,
-        runtime: impl rt::Runtime,
+        credentials: Option<Box<dyn Credentials>>,
+        runtime: Option<Box<dyn rt::Runtime>>,
         options: ChannelOptions,
     ) -> Self {
         Self {
+            uri: Uri::from_str(target).unwrap(), // TODO handle err
             cur_state: Mutex::new(ConnectivityState::Idle),
         }
     }
@@ -124,10 +136,37 @@ impl Channel {
     ) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
+
+    async fn wake_if_idle(&self) {
+        let s = self.cur_state.lock().unwrap();
+        if *s == ConnectivityState::Idle {
+            *s = ConnectivityState::Connecting;
+            let lb =
+                name_resolution::GLOBAL_REGISTRY.get_scheme(self.uri.scheme().unwrap().as_str());
+            let (tx, rx) = mpsc::channel(1);
+            let mut lbrx = lb
+                .unwrap()
+                .build(self.uri.clone(), rx, name_resolution::TODO);
+            tokio::spawn(async move {
+                let state = lbrx.recv().await.unwrap().unwrap();
+            });
+        }
+        return; // TODO
+    }
+    async fn wait_for_resolver_update(&self) {
+        return; // TODO
+    }
 }
 
+#[async_trait]
 impl Service for Channel {
     async fn call(&self, request: Request) -> Response {
-        Response::new()
+        self.wake_if_idle().await;
+        self.wait_for_resolver_update().await;
+        // pre-pick tasks (e.g. interceptor)
+        // start attempt
+        // pick subchannel
+        // perform attempt on transport
+        todo!()
     }
 }

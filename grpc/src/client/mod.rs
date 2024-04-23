@@ -1,5 +1,6 @@
 pub mod load_balancing;
 pub mod name_resolution;
+pub mod transport;
 
 mod channel;
 mod subchannel;

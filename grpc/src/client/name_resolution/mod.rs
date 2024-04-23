@@ -1,6 +1,7 @@
+use http::Uri;
 use once_cell::sync::Lazy;
-use std::{any::Any, collections::HashMap, error::Error, net::IpAddr};
-use url::Url;
+use std::{any::Any, collections::HashMap, net::IpAddr, sync::Arc};
+use tokio::sync::mpsc;
 
 use crate::attributes::Attributes;
 
@@ -8,22 +9,22 @@ pub struct TODO;
 
 /// A registry to store and retrieve name resolvers.  Resolvers are indexed by
 /// the URI scheme they are intended to handle.
-pub struct Registry<'a> {
-    m: HashMap<String, &'a (dyn Builder)>,
+pub struct Registry {
+    m: HashMap<String, Box<dyn Builder>>,
 }
 
-impl<'a> Registry<'a> {
+impl Registry {
     /// Construct an empty name resolver registry.
     pub fn new() -> Self {
         Self { m: HashMap::new() }
     }
     /// Add a name resolver into the registry.
-    pub fn add_builder(&mut self, builder: &'a impl Builder) {
+    pub fn add_builder(&mut self, builder: Box<dyn Builder>) {
         self.m.insert(builder.scheme().to_string(), builder);
     }
     /// Retrieve a name resolver from the registry, or None if not found.
-    pub fn get_scheme(&self, name: &str) -> Option<&(dyn Builder)> {
-        self.m.get(name).and_then(|&f| Some(f))
+    pub fn get_scheme(&self, name: &str) -> Option<&Box<dyn Builder>> {
+        self.m.get(name)
     }
 }
 
@@ -32,7 +33,7 @@ impl<'a> Registry<'a> {
 pub static GLOBAL_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
 
 /// This channel is a set of features the name resolver may use from the channel.
-pub trait Channel: Send + Sync {
+pub trait Channel {
     fn parse_service_config(&self, config: String) -> TODO;
     /// Consumes an update from the name resolver.
     fn update(&self, update: Update);
@@ -43,39 +44,42 @@ pub trait Builder: Send + Sync {
     /// Builds a name resolver instance, or returns an error.
     fn build(
         &self,
-        target: Url,
-        channel: Box<dyn Channel>,
+        target: Uri,
+        resolve_now: mpsc::Receiver<TODO>,
         options: TODO,
-    ) -> Result<Box<dyn Resolver>, Box<dyn Error>>;
+    ) -> mpsc::Receiver<Update>;
     /// Reports the URI scheme handled by this name resolver.
     fn scheme(&self) -> &'static str;
+    fn authority(&self, target: Uri) -> String {
+        String::from("")
+    }
 }
 
-pub type Update = Result<State, Box<dyn Error>>;
+pub type Update = Result<State, String>;
 
 /// Data provided by the name resolver
 pub struct State {
-    endpoints: Vec<Endpoint>,
-    service_config: TODO,
-    // Contains optional data which can be used by the LB Policy.
-    attributes: Attributes,
+    pub endpoints: Vec<Arc<Endpoint>>,
+    pub service_config: TODO,
+    // Contains optional data which can be used by the LB Policy or channel.
+    pub attributes: Attributes,
 }
 
 pub struct Endpoint {
-    addresses: Vec<Address>,
+    pub addresses: Vec<Arc<Address>>,
     // Contains optional data which can be used by the LB Policy.
-    attributes: Attributes,
+    pub attributes: Attributes,
 }
 
 pub struct Address {
-    address: String,
+    pub address: String,
     // Specifies the transport that should be used with this address.
-    address_type: String,
+    pub address_type: String,
     // Contains optional data which can be used by the Subchannel or transport.
-    attributes: Attributes,
+    pub attributes: Attributes,
 
     // OR instead of address + address_type:
-    address_alt_form: Box<dyn Any>,
+    pub address_alt_form: Box<dyn Any>,
 }
 
 // Example of an address:

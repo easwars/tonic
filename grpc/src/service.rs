@@ -1,10 +1,8 @@
-use std::{
-    future::Future,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
-use tonic::metadata::MetadataMap;
+use tonic::{async_trait, metadata::MetadataMap};
 
+#[derive(Debug)]
 struct TODO;
 
 // TODO: very similar to tower, obviously.  It's probably fine to always output
@@ -13,8 +11,9 @@ struct TODO;
 // RPC.
 //
 // Or can/should we use tonic's types (Service/Req/Res) directly?
-pub trait Service {
-    fn call(&self, request: Request) -> impl Future<Output = Response> + Send + Sync;
+#[async_trait]
+pub trait Service: Send + Sync {
+    async fn call(&self, request: Request) -> Response;
 }
 
 // TODO: are requests and responses different on client and server?  or do they
@@ -32,6 +31,10 @@ pub struct Request {
     compressor: Option<String>,
     wait_for_ready: bool,
 }
+
+unsafe impl Sync for Request {}
+
+unsafe impl Send for Request {}
 
 impl Request {
     pub fn new(method: String, parent: Option<Request>) -> Self {
@@ -53,10 +56,13 @@ impl Request {
     }
 }
 
-pub struct Response {}
+#[derive(Debug)]
+pub struct Response {
+    stream: TODO, // A way to stream headers, messages, and status/trailers.
+}
 
 impl Response {
     pub fn new() -> Self {
-        Response {}
+        Response { stream: TODO }
     }
 }

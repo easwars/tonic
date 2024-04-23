@@ -8,3 +8,5 @@ pub mod service;
 pub mod credentials;
 
 pub mod attributes;
+
+pub mod inmemory;

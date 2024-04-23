@@ -4,7 +4,9 @@ use tonic::metadata::MetadataMap;
 
 use crate::service::{Request, Response};
 
-use super::name_resolution::Address;
+use super::{name_resolution::Address, ConnectivityState};
+
+pub mod pick_first;
 
 pub struct TODO;
 
@@ -36,12 +38,19 @@ pub static GLOBAL_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
 pub trait Subchannel {
     /// Begins connecting the subchannel.
     fn connect(&self);
+    // Attaches a listener to the subchannel.  Must be called before connect and
+    // not after connect.
+    fn listen(
+        &self,
+        updates: Box<dyn Fn(ConnectivityState)>, // TODO: stream/asynciter/channel probably
+    );
+    fn shutdown(&self);
 }
 
 /// This channel is a set of features the LB policy may use from the channel.
 pub trait Channel {
     /// Creates a new subchannel in idle state.
-    fn new_subchannel(&self, address: Address) -> Result<Arc<dyn Subchannel>, Box<dyn Error>>;
+    fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
     /// Consumes an update from the LB Policy.
     fn update_state(&self, update: Update);
 }
@@ -49,31 +58,43 @@ pub trait Channel {
 /// An LB policy factory
 pub trait Builder: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
-    fn build(
-        &self,
-        channel: Arc<dyn Channel>,
-        options: TODO,
-    ) -> Result<Box<dyn Policy>, Box<dyn Error>>;
+    fn build(&self, channel: Arc<dyn Channel>, options: TODO) -> Box<dyn Policy>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
 }
 
-pub type Update = Result<State, Box<dyn Error>>;
+pub type Update = Result<Arc<State>, Box<dyn Error>>;
+pub type Picker = dyn Fn(Request) -> Result<Pick, Box<dyn Error>>;
 
 /// Data provided by the LB policy.
 pub struct State {
     connectivity_state: super::ConnectivityState,
-    picker: Arc<dyn Picker>,
+    picker: Arc<Picker>,
 }
 
-pub trait Picker {
-    fn pick(&self, request: Request) -> Result<Pick, Box<dyn Error>>;
+impl State {
+    pub fn new(connectivity_state: super::ConnectivityState, picker: Arc<Picker>) -> Self {
+        Self {
+            connectivity_state,
+            picker,
+        }
+    }
 }
 
 pub struct Pick {
     subchannel: Arc<dyn Subchannel>,
-    on_complete: Box<dyn FnOnce(Response)>,
-    metadata: MetadataMap, // to be added to existing outgoing metadata
+    on_complete: Option<Box<dyn FnOnce(Response)>>,
+    metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
+}
+
+impl Pick {
+    pub fn new(subchannel: Arc<dyn Subchannel>) -> Self {
+        Self {
+            subchannel,
+            on_complete: None,
+            metadata: None,
+        }
+    }
 }
 
 pub struct ResolverUpdate {
@@ -82,5 +103,5 @@ pub struct ResolverUpdate {
 }
 
 pub trait Policy {
-    fn resolver_update(&self, update: ResolverUpdate);
+    fn resolver_update(&mut self, update: ResolverUpdate);
 }
