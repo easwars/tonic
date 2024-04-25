@@ -1,5 +1,9 @@
 use once_cell::sync::Lazy;
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{Arc, Mutex},
+};
 use tonic::metadata::MetadataMap;
 
 use crate::service::{Request, Response};
@@ -13,21 +17,26 @@ pub struct TODO;
 /// A registry to store and retrieve LB policies.  LB policies are indexed by
 /// their names.
 pub struct Registry<'a> {
-    m: HashMap<String, &'a (dyn Builder)>,
+    m: Arc<Mutex<HashMap<String, &'a (dyn Builder)>>>,
 }
 
 impl<'a> Registry<'a> {
     /// Construct an empty LB policy registry.
     pub fn new() -> Self {
-        Self { m: HashMap::new() }
+        Self {
+            m: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
     /// Add a LB policy into the registry.
-    pub fn add_builder(&mut self, builder: &'a impl Builder) {
-        self.m.insert(builder.name().to_string(), builder);
+    pub fn add_builder(&self, builder: &'a impl Builder) {
+        self.m
+            .lock()
+            .unwrap()
+            .insert(builder.name().to_string(), builder);
     }
     /// Retrieve a LB policy from the registry, or None if not found.
     pub fn get_policy(&self, name: &str) -> Option<&(dyn Builder)> {
-        self.m.get(name).and_then(|&f| Some(f))
+        self.m.lock().unwrap().get(name).map(|&f| f)
     }
 }
 
@@ -35,7 +44,7 @@ impl<'a> Registry<'a> {
 /// does not exist in the local registry.
 pub static GLOBAL_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
 
-pub trait Subchannel {
+pub trait Subchannel: Send + Sync {
     /// Begins connecting the subchannel.
     fn connect(&self);
     // Attaches a listener to the subchannel.  Must be called before connect and
@@ -48,7 +57,7 @@ pub trait Subchannel {
 }
 
 /// This channel is a set of features the LB policy may use from the channel.
-pub trait Channel {
+pub trait Channel: Send + Sync {
     /// Creates a new subchannel in idle state.
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
     /// Consumes an update from the LB Policy.
@@ -98,10 +107,10 @@ impl Pick {
 }
 
 pub struct ResolverUpdate {
-    update: super::name_resolution::Update,
-    config: TODO, // LB policy's parsed config
+    pub update: super::name_resolution::Update,
+    pub config: TODO, // LB policy's parsed config
 }
 
-pub trait Policy {
+pub trait Policy: Send + Sync {
     fn resolver_update(&mut self, update: ResolverUpdate);
 }

@@ -27,6 +27,10 @@ impl lb::Builder for Builder {
     }
 }
 
+pub fn reg() {
+    super::GLOBAL_REGISTRY.add_builder(&Builder {})
+}
+
 #[derive(Clone)]
 struct Policy {
     ch: Arc<dyn lb::Channel>,
@@ -50,8 +54,9 @@ impl Policy {
 impl lb::Policy for Policy {
     fn resolver_update(&mut self, update: lb::ResolverUpdate) {
         if let Ok(u) = update.update {
-            if let Some(e) = u.endpoints.first() {
-                if let Some(a) = e.addresses.first() {
+            if let Some(e) = u.endpoints.into_iter().next() {
+                if let Some(a) = e.addresses.into_iter().next() {
+                    let a = Arc::new(a);
                     let slf = self.clone();
                     let sc = self.ch.new_subchannel(a.clone());
                     let old_sc = mem::replace(&mut self.sc, Some(sc.clone()));

@@ -21,6 +21,7 @@ pub trait Service: Send + Sync {
 // added to the request on the server but the client wouldn't see it.  The
 // stream/messages are different: the client can write request messages where
 // the server can only read them, and vice-versa.
+#[derive(Debug)]
 pub struct Request {
     method: String,
     stream: TODO, // A way to send/receive request messages.
@@ -31,10 +32,6 @@ pub struct Request {
     compressor: Option<String>,
     wait_for_ready: bool,
 }
-
-unsafe impl Sync for Request {}
-
-unsafe impl Send for Request {}
 
 impl Request {
     pub fn new(method: String, parent: Option<Request>) -> Self {

@@ -1,20 +1,21 @@
 use std::error::Error;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::vec;
 
-use http::Uri;
 use tokio::sync::mpsc;
 use tonic::async_trait;
+use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
 use crate::attributes::Attributes;
 use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::load_balancing::GLOBAL_REGISTRY;
-use super::name_resolution;
+use super::load_balancing::{pick_first, ResolverUpdate};
+use super::subchannel::Subchannel;
+use super::{load_balancing, name_resolution, transport};
 
 #[non_exhaustive]
 pub struct ChannelOptions<'a> {
@@ -85,9 +86,11 @@ impl<'a> ChannelOptions<'a> {
 
 // All of Channel needs to be thread-safe.  Arc<inner>?  Or give out
 // Arc<Channel> from constructor?
+#[derive(Clone)]
 pub struct Channel {
-    uri: Uri,
-    cur_state: Mutex<ConnectivityState>,
+    target: Url,
+    cur_state: Arc<Mutex<ConnectivityState>>,
+    lb: Arc<Mutex<Option<Box<dyn load_balancing::Policy>>>>,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -110,8 +113,9 @@ impl Channel {
         options: ChannelOptions,
     ) -> Self {
         Self {
-            uri: Uri::from_str(target).unwrap(), // TODO handle err
-            cur_state: Mutex::new(ConnectivityState::Idle),
+            target: Url::from_str(target).unwrap(), // TODO handle err
+            cur_state: Arc::new(Mutex::new(ConnectivityState::Idle)),
+            lb: Arc::new(Mutex::new(None)),
         }
     }
     // Waits until all outstanding RPCs are completed, then stops the client
@@ -138,23 +142,68 @@ impl Channel {
     }
 
     async fn wake_if_idle(&self) {
-        let s = self.cur_state.lock().unwrap();
+        let mut s = self.cur_state.lock().unwrap();
         if *s == ConnectivityState::Idle {
             *s = ConnectivityState::Connecting;
-            let lb =
-                name_resolution::GLOBAL_REGISTRY.get_scheme(self.uri.scheme().unwrap().as_str());
+            println!("creating resolver for scheme: {}", self.target.scheme());
+            let lb = name_resolution::GLOBAL_REGISTRY.get_scheme(self.target.scheme());
             let (tx, rx) = mpsc::channel(1);
             let mut lbrx = lb
                 .unwrap()
-                .build(self.uri.clone(), rx, name_resolution::TODO);
+                .build(self.target.clone(), rx, name_resolution::TODO);
+            let slf = self.clone();
             tokio::spawn(async move {
-                let state = lbrx.recv().await.unwrap().unwrap();
+                while let Some(Ok(state)) = lbrx.recv().await {
+                    println!("got update: {:?}", state);
+                    slf.update_lb(state).await;
+                }
             });
         }
         return; // TODO
     }
     async fn wait_for_resolver_update(&self) {
         return; // TODO
+    }
+
+    async fn update_lb(&self, state: name_resolution::State) {
+        let policy_name = pick_first::POLICY_NAME;
+        if state.service_config != name_resolution::TODO {
+            // TODO: figure out lb policy name and config
+            todo!();
+        }
+        let mut p = self.lb.lock().unwrap();
+        match &*p {
+            None => {
+                let newpol = load_balancing::GLOBAL_REGISTRY
+                    .get_policy(policy_name)
+                    .unwrap()
+                    .build(Arc::new(self.clone()), load_balancing::TODO);
+                *p = Some(newpol);
+            }
+            _ => {}
+        };
+        p.as_deref_mut().unwrap().resolver_update(ResolverUpdate {
+            update: Ok(state),
+            config: load_balancing::TODO,
+        });
+        // TODO: close old LB policy gracefully vs. drop?
+    }
+}
+
+impl load_balancing::Channel for Channel {
+    fn new_subchannel(
+        &self,
+        address: Arc<name_resolution::Address>,
+    ) -> Arc<dyn load_balancing::Subchannel> {
+        dbg!("Address: ", &address.addr);
+        let t = transport::GLOBAL_REGISTRY
+            .get_transport(&address.addr)
+            .unwrap();
+        Arc::new(Subchannel::new(t))
+    }
+
+    fn update_state(&self, update: load_balancing::Update) {
+        todo!()
     }
 }
 
@@ -167,6 +216,7 @@ impl Service for Channel {
         // start attempt
         // pick subchannel
         // perform attempt on transport
-        todo!()
+        println!("performing call?");
+        Response::new()
     }
 }
