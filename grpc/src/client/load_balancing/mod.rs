@@ -1,5 +1,6 @@
 use once_cell::sync::Lazy;
 use std::{
+    any::Any,
     collections::HashMap,
     error::Error,
     sync::{Arc, Mutex},
@@ -51,9 +52,10 @@ pub trait Subchannel: Send + Sync {
     // not after connect.
     fn listen(
         &self,
-        updates: Box<dyn Fn(ConnectivityState)>, // TODO: stream/asynciter/channel probably
+        updates: Box<dyn Fn(ConnectivityState) + Send + Sync>, // TODO: stream/asynciter/channel probably
     );
     fn shutdown(&self);
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// This channel is a set of features the LB policy may use from the channel.
@@ -72,38 +74,19 @@ pub trait Builder: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
-pub type Update = Result<Arc<State>, Box<dyn Error>>;
-pub type Picker = dyn Fn(Request) -> Result<Pick, Box<dyn Error>>;
+pub type Update = Result<Box<State>, Box<dyn Error>>;
+pub type Picker = dyn Fn(&Request) -> Result<Pick, Box<dyn Error>> + Send + Sync;
 
 /// Data provided by the LB policy.
 pub struct State {
-    connectivity_state: super::ConnectivityState,
-    picker: Arc<Picker>,
-}
-
-impl State {
-    pub fn new(connectivity_state: super::ConnectivityState, picker: Arc<Picker>) -> Self {
-        Self {
-            connectivity_state,
-            picker,
-        }
-    }
+    pub connectivity_state: super::ConnectivityState,
+    pub picker: Box<Picker>,
 }
 
 pub struct Pick {
-    subchannel: Arc<dyn Subchannel>,
-    on_complete: Option<Box<dyn FnOnce(Response)>>,
-    metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
-}
-
-impl Pick {
-    pub fn new(subchannel: Arc<dyn Subchannel>) -> Self {
-        Self {
-            subchannel,
-            on_complete: None,
-            metadata: None,
-        }
-    }
+    pub subchannel: Arc<dyn Subchannel>,
+    pub on_complete: Option<Box<dyn FnOnce(Response) + Send + Sync>>,
+    pub metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
 }
 
 pub struct ResolverUpdate {

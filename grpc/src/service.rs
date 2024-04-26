@@ -1,6 +1,4 @@
-use std::time::{Duration, Instant};
-
-use tonic::{async_trait, metadata::MetadataMap};
+use tonic::async_trait;
 
 #[derive(Debug)]
 struct TODO;
@@ -23,43 +21,50 @@ pub trait Service: Send + Sync {
 // the server can only read them, and vice-versa.
 #[derive(Debug)]
 pub struct Request {
-    method: String,
-    stream: TODO, // A way to send/receive request messages.
+    pub method: String,
+    /*    stream: TODO, // A way to send/receive request messages.
 
     // Should all of the below optional things be "extensions"?
     metadata: MetadataMap,
     deadline: Option<Instant>,
     compressor: Option<String>,
     wait_for_ready: bool,
+    */
 }
 
 impl Request {
     pub fn new(method: String, parent: Option<Request>) -> Self {
         Self {
             method,
-            stream: TODO,
+            /*      stream: TODO,
             metadata: MetadataMap::new(),
             deadline: parent.and_then(|p| p.deadline),
             compressor: None,
-            wait_for_ready: false,
+            wait_for_ready: false,*/
         }
     }
-
+    /*
     pub fn set_timeout(self, timeout: Duration) -> Self {
         Self {
             deadline: Some(Instant::now() + timeout),
             ..self
         }
-    }
+    }*/
 }
 
 #[derive(Debug)]
 pub struct Response {
-    stream: TODO, // A way to stream headers, messages, and status/trailers.
+    //stream: TODO, // A way to stream headers, messages, and status/trailers.
+    msg: String,
 }
 
 impl Response {
     pub fn new() -> Self {
-        Response { stream: TODO }
+        Response {
+            msg: String::from(""),
+        }
+    }
+    pub fn new_with_str(s: String) -> Self {
+        Response { msg: s }
     }
 }

@@ -25,6 +25,7 @@ impl Server {
 
     pub async fn serve(&self, l: impl Listener) {
         while let Some((req, reply_on)) = l.accept().await {
+            dbg!("got req:", &req);
             reply_on
                 .send(self.handler.as_ref().unwrap().call(req).await)
                 .ok(); // TODO: log error

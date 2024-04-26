@@ -1,23 +1,24 @@
 use std::{
-    any::{Any, TypeId},
     collections::HashMap,
-    fmt::Display,
     sync::{Arc, Mutex},
 };
 
 use once_cell::sync::Lazy;
 
 use crate::service::Service;
-pub trait Address: Any + Display + std::fmt::Debug + Send + Sync {}
 
 pub trait Transport: Send + Sync {
-    fn connect(&self, addr: &Box<dyn Address>) -> Result<Box<dyn Service>, String>;
+    fn connect(&self, address: String) -> Result<Box<dyn ConnectedTransport>, String>;
+}
+
+pub trait ConnectedTransport: Send + Sync {
+    fn get_service(&self) -> Result<Box<dyn Service>, String>;
 }
 
 /// A registry to store and retrieve transports.  Transports are indexed by
 /// the address type they are intended to handle.
 pub struct Registry {
-    m: Arc<Mutex<HashMap<TypeId, Arc<dyn Transport>>>>,
+    m: Arc<Mutex<HashMap<String, Arc<Box<dyn Transport>>>>>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -38,26 +39,24 @@ impl Registry {
         }
     }
     /// Add a name resolver into the registry.
-    pub fn add_transport<A, T>(&self, transport: T)
-    where
-        A: 'static,
-        T: 'static + Transport,
-    {
+    pub fn add_transport(&self, address_type: String, transport: Box<dyn Transport>) {
         //let a: Arc<dyn Any> = transport;
         //let a: Arc<dyn Transport<Addr = dyn Any>> = transport;
         self.m
             .lock()
             .unwrap()
-            .insert(TypeId::of::<A>(), Arc::new(transport));
+            .insert(address_type, Arc::new(transport));
     }
     /// Retrieve a name resolver from the registry, or None if not found.
-    pub fn get_transport(&self, addr: &Box<dyn Address>) -> Result<Box<dyn Service>, String> {
+    pub fn get_transport(&self, address_type: &String) -> Result<Arc<Box<dyn Transport>>, String> {
         self.m
             .lock()
             .unwrap()
-            .get(&(**addr).type_id())
-            .ok_or(format!("no transport found for address {addr}")) // TODO: print address
-            .and_then(|t| t.connect(addr))
+            .get(address_type)
+            .ok_or(format!(
+                "no transport found for address type {address_type}"
+            ))
+            .map(|t| t.clone())
     }
 }
 

@@ -38,15 +38,22 @@ struct Policy {
 }
 
 impl Policy {
-    fn pick(&self, _r: Request) -> Result<Pick, Box<dyn Error>> {
-        Ok(Pick::new(self.sc.clone().unwrap()))
+    fn pick(&self, _r: &Request) -> Result<Pick, Box<dyn Error>> {
+        Ok(Pick {
+            subchannel: self.sc.clone().unwrap(),
+            on_complete: None,
+            metadata: None,
+        })
     }
     fn update(&self, s: ConnectivityState) {
+        println!("lb update called: {s:?} -- sc? {}", self.sc.is_some());
         let sc = self.sc.clone();
         if s == ConnectivityState::Ready {
             let slf = self.clone();
-            self.ch
-                .update_state(Ok(Arc::new(State::new(s, Arc::new(move |v| slf.pick(v))))));
+            self.ch.update_state(Ok(Box::new(State {
+                connectivity_state: s,
+                picker: Box::new(move |v| slf.pick(v)),
+            })));
         }
     }
 }
@@ -57,12 +64,18 @@ impl lb::Policy for Policy {
             if let Some(e) = u.endpoints.into_iter().next() {
                 if let Some(a) = e.addresses.into_iter().next() {
                     let a = Arc::new(a);
-                    let slf = self.clone();
                     let sc = self.ch.new_subchannel(a.clone());
+                    println!("prev sc: {}", self.sc.is_some());
                     let old_sc = mem::replace(&mut self.sc, Some(sc.clone()));
+                    println!(
+                        "old_sc: {}, new sc: {}",
+                        old_sc.is_some(),
+                        self.sc.is_some()
+                    );
                     if let Some(o) = old_sc {
                         o.shutdown();
                     };
+                    let slf = self.clone();
                     sc.listen(Box::new(move |s| slf.update(s)));
                     sc.connect();
                 }

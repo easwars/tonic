@@ -1,19 +1,26 @@
-use std::sync::Arc;
+use std::any::Any;
+use std::sync::{Arc, Mutex};
 
 use tonic::async_trait;
 
+use super::load_balancing;
+use crate::client::transport;
 use crate::service::{Request, Response, Service};
 
-use super::load_balancing;
-
 pub(crate) struct Subchannel {
-    t: Arc<Box<dyn Service>>,
+    t: Arc<Box<dyn transport::Transport>>,
+    ct: Arc<Mutex<Option<Arc<Box<dyn transport::ConnectedTransport>>>>>,
+    address: String,
 }
 
 impl Subchannel {
     /// Creates a new subchannel in idle state.
-    pub fn new(t: Box<dyn Service>) -> Self {
-        Subchannel { t: Arc::new(t) }
+    pub fn new(t: Arc<Box<dyn transport::Transport>>, address: String) -> Self {
+        Subchannel {
+            t,
+            ct: Arc::new(Mutex::new(None)),
+            address,
+        }
     }
     /// Drain waits for any in-flight RPCs to terminate and then closes the
     /// connection and consumes the Subchannel.
@@ -30,24 +37,34 @@ impl Subchannel {
 
 impl load_balancing::Subchannel for Subchannel {
     fn connect(&self) {
-        todo!()
+        let mut ct = self.ct.lock().unwrap();
+        if ct.is_none() {
+            *ct = Some(Arc::new(self.t.connect(self.address.clone()).unwrap()));
+        }
     }
 
     fn listen(
         &self,
-        updates: Box<dyn Fn(super::ConnectivityState)>, // TODO: stream/asynciter/channel probably
+        updates: Box<dyn Fn(super::ConnectivityState) + Send + Sync>, // TODO: stream/asynciter/channel probably
     ) {
-        todo!()
+        updates(super::ConnectivityState::Ready);
+        // TODO
     }
 
     fn shutdown(&self) {
-        todo!()
+        // Drop the connected transport, if there is one.
+        self.ct.lock().unwrap().take();
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
 #[async_trait]
 impl Service for Subchannel {
     async fn call(&self, request: Request) -> Response {
-        todo!()
+        let ct = self.ct.lock().unwrap().as_ref().unwrap().clone();
+        let svc: Box<dyn Service> = ct.get_service().unwrap();
+        svc.call(request).await
     }
 }

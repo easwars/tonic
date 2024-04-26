@@ -1,16 +1,12 @@
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
-    fmt::{Debug, Display},
-    net::IpAddr,
+    fmt::Display,
     sync::{Arc, Mutex},
 };
-use tokio::sync::mpsc;
 use url::Url;
 
 use crate::attributes::Attributes;
-
-use super::transport;
 
 #[derive(Debug, PartialEq)]
 pub struct TODO;
@@ -18,7 +14,7 @@ pub struct TODO;
 /// A registry to store and retrieve name resolvers.  Resolvers are indexed by
 /// the URI scheme they are intended to handle.
 pub struct Registry {
-    m: Arc<Mutex<HashMap<String, Arc<dyn Builder>>>>,
+    m: Arc<Mutex<HashMap<String, Arc<dyn Maker>>>>,
 }
 
 impl Registry {
@@ -29,14 +25,14 @@ impl Registry {
         }
     }
     /// Add a name resolver into the registry.
-    pub fn add_builder(&self, builder: impl Builder + 'static) {
+    pub fn add_builder(&self, builder: impl Maker + 'static) {
         self.m
             .lock()
             .unwrap()
             .insert(builder.scheme().to_string(), Arc::new(builder));
     }
     /// Retrieve a name resolver from the registry, or None if not found.
-    pub fn get_scheme(&self, name: &str) -> Option<Arc<dyn Builder>> {
+    pub fn get_scheme(&self, name: &str) -> Option<Arc<dyn Maker>> {
         self.m.lock().unwrap().get(name).map(|f| f.clone())
     }
 }
@@ -53,14 +49,14 @@ pub trait Channel {
 }
 
 /// A name resolver factory
-pub trait Builder: Send + Sync {
+pub trait Maker: Send + Sync {
     /// Builds a name resolver instance, or returns an error.
-    fn build(
+    fn make_resolver(
         &self,
         target: Url,
-        resolve_now: mpsc::Receiver<TODO>,
-        options: TODO,
-    ) -> mpsc::Receiver<Update>;
+        channel: Box<dyn Channel>,
+        options: ResolverOptions,
+    ) -> Box<dyn Resolver>;
     /// Reports the URI scheme handled by this name resolver.
     fn scheme(&self) -> &'static str;
     fn authority<'a>(&self, target: &'a Url) -> &'a str {
@@ -70,6 +66,12 @@ pub trait Builder: Send + Sync {
 }
 
 pub type Update = Result<State, String>;
+
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct ResolverOptions {
+    authority: String,
+}
 
 /// Data provided by the name resolver
 #[derive(Debug)]
@@ -92,8 +94,9 @@ pub struct Endpoint {
 #[derive(Debug)] // TODO: define manually to get type of addr
 #[non_exhaustive]
 pub struct Address {
-    // The address represented as a transport address
-    pub addr: Box<dyn transport::Address>,
+    // The address a string describing its type and a string.
+    pub address_type: String, // TODO: &'static str?
+    pub address: String,
     // Contains optional data which can be used by the Subchannel or transport.
     pub attributes: Attributes,
 }
@@ -104,12 +107,7 @@ impl Display for Address {
     }
 }
 
-// Example of an address:
-#[derive(Debug)]
-pub struct TcpIpAddress {
-    address: IpAddr,
-}
-// Then a registry of address types and which transport should handle that address type.
+pub static TCP_IP_ADDRESS_TYPE: &str = "tcp";
 
 pub trait Resolver {
     fn resolve_now(&self);

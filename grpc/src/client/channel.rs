@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::vec;
 
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
@@ -88,12 +88,17 @@ impl<'a> ChannelOptions<'a> {
 // Arc<Channel> from constructor?
 #[derive(Clone)]
 pub struct Channel {
-    target: Url,
-    cur_state: Arc<Mutex<ConnectivityState>>,
-    lb: Arc<Mutex<Option<Box<dyn load_balancing::Policy>>>>,
+    inner: Arc<Inner>,
 }
 
-#[derive(Copy, Clone, PartialEq)]
+struct Inner {
+    target: Url,
+    cur_state: Mutex<ConnectivityState>,
+    lb: Mutex<Option<Box<dyn load_balancing::Policy>>>,
+    picker: PickerWrapper,
+}
+
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum ConnectivityState {
     Idle,
     Connecting,
@@ -104,8 +109,6 @@ pub enum ConnectivityState {
 pub struct TODO;
 
 impl Channel {
-    // Channels begin idle so new is a simple constructor.  Required parameters
-    // are not in ChannelOptions.
     pub fn new(
         target: &str,
         credentials: Option<Box<dyn Credentials>>,
@@ -113,9 +116,7 @@ impl Channel {
         options: ChannelOptions,
     ) -> Self {
         Self {
-            target: Url::from_str(target).unwrap(), // TODO handle err
-            cur_state: Arc::new(Mutex::new(ConnectivityState::Idle)),
-            lb: Arc::new(Mutex::new(None)),
+            inner: Arc::new(Inner::new(target, credentials, runtime, options)),
         }
     }
     // Waits until all outstanding RPCs are completed, then stops the client
@@ -129,10 +130,11 @@ impl Channel {
 
     /// Returns the current state of the channel.
     pub fn state(&mut self, connect: bool) -> ConnectivityState {
-        *self.cur_state.lock().unwrap()
+        *self.inner.cur_state.lock().unwrap()
     }
 
     /// Waits for the state of the channel to change from source.  Times out and returns an error after the deadline.
+    // TODO: do we want this or another API based on streaming?
     pub async fn wait_for_state_change(
         &self,
         source: ConnectivityState,
@@ -142,30 +144,46 @@ impl Channel {
     }
 
     async fn wake_if_idle(&self) {
-        let mut s = self.cur_state.lock().unwrap();
+        let mut s = self.inner.cur_state.lock().unwrap();
         if *s == ConnectivityState::Idle {
             *s = ConnectivityState::Connecting;
-            println!("creating resolver for scheme: {}", self.target.scheme());
-            let lb = name_resolution::GLOBAL_REGISTRY.get_scheme(self.target.scheme());
-            let (tx, rx) = mpsc::channel(1);
-            let mut lbrx = lb
-                .unwrap()
-                .build(self.target.clone(), rx, name_resolution::TODO);
+            println!(
+                "creating resolver for scheme: {}",
+                self.inner.target.scheme()
+            );
+            let rb = name_resolution::GLOBAL_REGISTRY.get_scheme(self.inner.target.scheme());
+            let resolver = rb.unwrap().make_resolver(
+                self.inner.target.clone(),
+                Box::new(self.inner.clone()),
+                name_resolution::ResolverOptions::default(),
+            );
             let slf = self.clone();
-            tokio::spawn(async move {
-                while let Some(Ok(state)) = lbrx.recv().await {
-                    println!("got update: {:?}", state);
-                    slf.update_lb(state).await;
-                }
-            });
         }
         return; // TODO
     }
     async fn wait_for_resolver_update(&self) {
         return; // TODO
     }
+}
 
-    async fn update_lb(&self, state: name_resolution::State) {
+impl Inner {
+    // Channels begin idle so new is a simple constructor.  Required parameters
+    // are not in ChannelOptions.
+    fn new(
+        target: &str,
+        credentials: Option<Box<dyn Credentials>>,
+        runtime: Option<Box<dyn rt::Runtime>>,
+        options: ChannelOptions,
+    ) -> Self {
+        Self {
+            target: Url::from_str(target).unwrap(), // TODO handle err
+            cur_state: Mutex::new(ConnectivityState::Idle),
+            lb: Mutex::new(None),
+            picker: PickerWrapper::new(),
+        }
+    }
+
+    fn update_lb(self: &Arc<Self>, state: name_resolution::State) {
         let policy_name = pick_first::POLICY_NAME;
         if state.service_config != name_resolution::TODO {
             // TODO: figure out lb policy name and config
@@ -177,7 +195,7 @@ impl Channel {
                 let newpol = load_balancing::GLOBAL_REGISTRY
                     .get_policy(policy_name)
                     .unwrap()
-                    .build(Arc::new(self.clone()), load_balancing::TODO);
+                    .build(self.clone(), load_balancing::TODO);
                 *p = Some(newpol);
             }
             _ => {}
@@ -190,20 +208,33 @@ impl Channel {
     }
 }
 
-impl load_balancing::Channel for Channel {
+impl name_resolution::Channel for Arc<Inner> {
+    fn parse_service_config(&self, config: String) -> name_resolution::TODO {
+        todo!()
+    }
+
+    fn update(&self, update: name_resolution::Update) {
+        if let Ok(state) = update {
+            println!("got update: {:?}", state);
+            self.clone().update_lb(state);
+        } // TODO: handle error
+    }
+}
+
+impl load_balancing::Channel for Inner {
     fn new_subchannel(
         &self,
         address: Arc<name_resolution::Address>,
     ) -> Arc<dyn load_balancing::Subchannel> {
-        dbg!("Address: ", &address.addr);
         let t = transport::GLOBAL_REGISTRY
-            .get_transport(&address.addr)
+            .get_transport(&address.address_type)
             .unwrap();
-        Arc::new(Subchannel::new(t))
+        Arc::new(Subchannel::new(t, address.address.clone()))
     }
 
     fn update_state(&self, update: load_balancing::Update) {
-        todo!()
+        let u = update.unwrap();
+        self.picker.update(u.picker);
     }
 }
 
@@ -217,6 +248,51 @@ impl Service for Channel {
         // pick subchannel
         // perform attempt on transport
         println!("performing call?");
-        Response::new()
+        let mut i = self.inner.picker.iter();
+        loop {
+            println!("pick ?");
+            if let Some(p) = i.next().await {
+                println!("got picker");
+                let sc = p(&request).unwrap();
+                let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
+                return sc.call(request).await;
+            }
+        }
+    }
+}
+
+struct PickerWrapper {
+    tx: watch::Sender<Option<Arc<Box<load_balancing::Picker>>>>,
+    rx: watch::Receiver<Option<Arc<Box<load_balancing::Picker>>>>,
+}
+struct PickerWrapperIter {
+    rx: watch::Receiver<Option<Arc<Box<load_balancing::Picker>>>>,
+}
+
+impl PickerWrapper {
+    fn new() -> Self {
+        let (tx, rx) = watch::channel(None);
+        Self { tx, rx }
+    }
+
+    fn iter(&self) -> PickerWrapperIter {
+        let mut rx = self.rx.clone();
+        rx.mark_changed();
+        PickerWrapperIter {
+            rx: self.rx.clone(),
+        }
+    }
+
+    fn update(&self, picker: Box<load_balancing::Picker>) {
+        println!("updating picker");
+        self.tx.send(Some(Arc::new(picker))).unwrap();
+    }
+}
+
+impl PickerWrapperIter {
+    async fn next(&mut self) -> Option<Arc<Box<load_balancing::Picker>>> {
+        self.rx.changed().await.ok()?;
+        let x = self.rx.borrow_and_update();
+        x.clone()
     }
 }
