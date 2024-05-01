@@ -14,6 +14,7 @@ use crate::rt;
 use crate::service::{Request, Response, Service};
 
 use super::load_balancing::{pick_first, ResolverUpdate};
+use super::name_resolution::ResolverBuilder;
 use super::subchannel::Subchannel;
 use super::{load_balancing, name_resolution, transport};
 
@@ -30,7 +31,7 @@ pub struct ChannelOptions<'a> {
     pub idle_timeout: Duration,
     pub transport_registry: Option<super::transport::Registry>,
     pub name_resolver_registry: Option<super::load_balancing::Registry<'a>>,
-    pub lb_policy_registry: Option<super::name_resolution::Registry>,
+    pub lb_policy_registry: Option<super::name_resolution::ResolverRegistry>,
 
     // Typically we allow settings at the channel level that impact all RPCs,
     // but can also be set per-RPC.  E.g.s:
@@ -157,11 +158,22 @@ impl Channel {
                 self.inner.target.scheme()
             );
             let rb = name_resolution::GLOBAL_REGISTRY.get_scheme(self.inner.target.scheme());
-            let resolver = rb.unwrap().make_resolver(
+            let resolver = rb.unwrap().build(
                 self.inner.target.clone(),
-                Box::new(Arc::downgrade(&self.inner)),
                 name_resolution::ResolverOptions::default(),
             );
+            let inner = self.inner.clone();
+            tokio::task::spawn(async move {
+                // TODO: terminate this task when we go idle.
+                loop {
+                    let update = resolver.update().await;
+                    if let Ok(state) = update {
+                        println!("got update: {:?}", state);
+                        return inner.update_lb(state);
+                    }
+                    panic!("TODO: handle error in update");
+                }
+            });
             // TODO: save resolver in field.
         }
         return; // TODO
@@ -234,20 +246,15 @@ impl Inner {
         // TODO: close old LB policy gracefully vs. drop?
     }
 }
-
+/*
 impl name_resolution::Channel for Weak<Inner> {
     fn parse_service_config(&self, config: String) -> name_resolution::TODO {
         todo!()
     }
 
     fn update(&self, update: name_resolution::Update) -> Result<(), String> {
-        if let Ok(state) = update {
-            println!("got update: {:?}", state);
-            return self.upgrade().ok_or("channel closed")?.update_lb(state);
-        }
-        Err(String::from("TODO: handle error in update"))
     }
-}
+}*/
 
 impl Drop for Inner {
     fn drop(&mut self) {
@@ -324,23 +331,13 @@ impl<T> Watcher<T> {
     }
 }
 
-impl<T> Drop for Watcher<T> {
-    fn drop(&mut self) {
-        println!("WATCHER dropped")
-    }
-}
-
 impl<T> WatcherIter<T> {
     // next returns None when the Watcher is dropped.
     async fn next(&mut self) -> Option<Arc<T>> {
-        println!("next called");
         loop {
-            println!("next looping start");
             self.rx.changed().await.ok()?;
-            println!("next unblocked");
             let x = self.rx.borrow_and_update();
             if x.is_some() {
-                println!("next returning");
                 return x.clone();
             }
         }

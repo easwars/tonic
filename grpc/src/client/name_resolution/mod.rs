@@ -4,6 +4,7 @@ use std::{
     fmt::Display,
     sync::{Arc, Mutex},
 };
+use tonic::async_trait;
 use url::Url;
 
 use crate::attributes::Attributes;
@@ -11,13 +12,34 @@ use crate::attributes::Attributes;
 #[derive(Debug, PartialEq)]
 pub struct TODO;
 
-/// A registry to store and retrieve name resolvers.  Resolvers are indexed by
-/// the URI scheme they are intended to handle.
-pub struct Registry {
-    m: Arc<Mutex<HashMap<String, Arc<dyn Maker>>>>,
+#[derive(Clone)]
+pub struct SharedResolverBuilder {
+    rb: Arc<dyn ResolverBuilder>,
 }
 
-impl Registry {
+impl SharedResolverBuilder {
+    pub fn new(rb: impl ResolverBuilder + 'static) -> Self {
+        Self { rb: Arc::new(rb) }
+    }
+}
+
+impl ResolverBuilder for SharedResolverBuilder {
+    fn build(&self, target: Url, options: ResolverOptions) -> Box<dyn Resolver> {
+        self.rb.build(target, options)
+    }
+
+    fn scheme(&self) -> &'static str {
+        self.rb.scheme()
+    }
+}
+
+/// A registry to store and retrieve name resolvers.  Resolvers are indexed by
+/// the URI scheme they are intended to handle.
+pub struct ResolverRegistry {
+    m: Arc<Mutex<HashMap<String, SharedResolverBuilder>>>,
+}
+
+impl ResolverRegistry {
     /// Construct an empty name resolver registry.
     pub fn new() -> Self {
         Self {
@@ -25,43 +47,33 @@ impl Registry {
         }
     }
     /// Add a name resolver into the registry.
-    pub fn add_builder(&self, builder: impl Maker + 'static) {
+    pub fn add_builder(&self, builder: SharedResolverBuilder) {
         self.m
             .lock()
             .unwrap()
-            .insert(builder.scheme().to_string(), Arc::new(builder));
+            .insert(builder.scheme().to_string(), builder);
     }
     /// Retrieve a name resolver from the registry, or None if not found.
-    pub fn get_scheme(&self, name: &str) -> Option<Arc<dyn Maker>> {
+    pub fn get_scheme(&self, name: &str) -> Option<SharedResolverBuilder> {
         self.m.lock().unwrap().get(name).map(|f| f.clone())
     }
 }
 
 /// The registry used if a local registry is not provided to a channel or if it
 /// does not exist in the local registry.
-pub static GLOBAL_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
-
-/// This channel is a set of features the name resolver may use from the channel.
-pub trait Channel {
-    fn parse_service_config(&self, config: String) -> TODO;
-    /// Consumes an update from the name resolver.
-    fn update(&self, update: Update) -> Result<(), String>;
-}
+pub static GLOBAL_REGISTRY: Lazy<ResolverRegistry> = Lazy::new(|| ResolverRegistry::new());
 
 /// A name resolver factory
-pub trait Maker: Send + Sync {
+pub trait ResolverBuilder: Send + Sync {
     /// Builds a name resolver instance, or returns an error.
-    fn make_resolver(
-        &self,
-        target: Url,
-        channel: Box<dyn Channel>,
-        options: ResolverOptions,
-    ) -> Box<dyn Resolver>;
+    fn build(&self, target: Url, options: ResolverOptions) -> Box<dyn Resolver>;
     /// Reports the URI scheme handled by this name resolver.
     fn scheme(&self) -> &'static str;
-    fn authority<'a>(&self, target: &'a Url) -> &'a str {
+    /// Returns the default authority for a channel using this name resolver and
+    /// target.
+    fn authority(&self, target: &Url) -> String {
         let path = target.path();
-        path.strip_prefix("/").unwrap_or(path)
+        path.strip_prefix("/").unwrap_or(path).to_string()
     }
 }
 
@@ -109,13 +121,8 @@ impl Display for Address {
 
 pub static TCP_IP_ADDRESS_TYPE: &str = "tcp";
 
-pub trait Resolver {
+#[async_trait]
+pub trait Resolver: Send + Sync {
     fn resolve_now(&self);
-}
-
-#[non_exhaustive]
-pub struct BuildOptions {
-    // For calling into the parent channel/wrapper:
-    pub parse_service_config: Box<dyn Fn(&str) -> TODO>,
-    pub update: Box<dyn Fn(Update) -> Result<(), String>>,
+    async fn update(&self) -> Update;
 }

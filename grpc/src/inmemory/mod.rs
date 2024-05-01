@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    mem,
     sync::{
         atomic::{AtomicU32, Ordering},
         Arc, Mutex,
@@ -8,7 +9,10 @@ use std::{
 
 use crate::{
     attributes::Attributes,
-    client::{name_resolution, transport},
+    client::{
+        name_resolution::{self, ResolverBuilder, SharedResolverBuilder, Update},
+        transport,
+    },
     server,
     service::{Request, Response, Service},
 };
@@ -119,28 +123,21 @@ pub fn reg() {
         INMEMORY_ADDRESS_TYPE.to_string(),
         Box::new(ClientTransport::new()),
     );
-    name_resolution::GLOBAL_REGISTRY.add_builder(ResolverAndBuilder {});
+    name_resolution::GLOBAL_REGISTRY
+        .add_builder(SharedResolverBuilder::new(InMemoryResolverBuilder));
 }
 
-struct ResolverAndBuilder {}
+struct InMemoryResolverBuilder;
 
-impl Drop for ResolverAndBuilder {
-    fn drop(&mut self) {
-        println!("RAB dropped");
-    }
-}
-
-impl crate::client::name_resolution::Maker for ResolverAndBuilder {
-    fn make_resolver(
+impl ResolverBuilder for InMemoryResolverBuilder {
+    fn build(
         &self,
         target: url::Url,
-        channel: Box<dyn name_resolution::Channel>,
         options: crate::client::name_resolution::ResolverOptions,
     ) -> Box<dyn name_resolution::Resolver> {
         let id = target.path().strip_prefix("/").unwrap();
-        // The inmemory resolver can't re-resolve, so ignore return value.
-        // TODO: maybe log instead, but the channel should do that anyway.
-        let _ = channel.update(Ok(name_resolution::State {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let _ = tx.try_send(Ok(name_resolution::State {
             endpoints: vec![name_resolution::Endpoint {
                 addresses: vec![name_resolution::Address {
                     address_type: INMEMORY_ADDRESS_TYPE.to_string(),
@@ -152,7 +149,9 @@ impl crate::client::name_resolution::Maker for ResolverAndBuilder {
             service_config: name_resolution::TODO,
             attributes: Attributes::new(),
         }));
-        Box::new(ResolverAndBuilder {})
+        Box::new(InMemoryResolver {
+            rx: Mutex::new(Some(rx)),
+        })
     }
 
     fn scheme(&self) -> &'static str {
@@ -160,6 +159,25 @@ impl crate::client::name_resolution::Maker for ResolverAndBuilder {
     }
 }
 
-impl name_resolution::Resolver for ResolverAndBuilder {
-    fn resolve_now(&self) {} // ignored.
+struct InMemoryResolver {
+    rx: Mutex<Option<mpsc::Receiver<Update>>>,
+}
+
+#[async_trait]
+impl name_resolution::Resolver for InMemoryResolver {
+    fn resolve_now(&self) {
+        // Ignored as there is no way to re-resolve the in-memory resolver.
+    }
+
+    async fn update(&self) -> Update {
+        // The first call should immediately yield the address.  Subsequent call
+        // should never return.
+        let mut rx = mem::replace(&mut *self.rx.lock().unwrap(), None).unwrap();
+        let res = rx
+            .recv()
+            .await
+            .unwrap_or(Err(String::from("resolver closed")));
+        let _ = mem::replace(&mut *self.rx.lock().unwrap(), Some(rx));
+        res
+    }
 }
