@@ -1,6 +1,7 @@
 use grpc::client::load_balancing::pick_first;
 use grpc::service::{Request, Response, Service};
 use grpc::{client::ChannelOptions, inmemory};
+use tokio::time::sleep;
 use tonic::async_trait;
 
 struct Handler {}
@@ -8,7 +9,7 @@ struct Handler {}
 #[async_trait]
 impl Service for Handler {
     async fn call(&self, request: Request) -> Response {
-        Response::new_with_str(request.method)
+        Response::new_with_str(format!("responding to: {}", request.method))
     }
 }
 
@@ -20,12 +21,21 @@ async fn main() {
     let mut srv = grpc::server::Server::new();
     srv.set_handler(Box::new(Handler {}));
     let target = lis.target();
-    tokio::spawn(async move {
-        srv.serve(lis).await;
+    let lis2 = lis.clone();
+    tokio::task::spawn(async move {
+        srv.serve(&lis2).await;
+        println!("serve returned!");
     });
     println!("{target}");
     let chan = grpc::client::Channel::new(target.as_str(), None, None, ChannelOptions::default());
     let req = Request::new("hi".to_string(), None);
     let res = chan.call(req).await;
     println!("CALL RESPONSE: {:?}", res);
+    println!("waiting 2s");
+    sleep(std::time::Duration::from_secs(2)).await;
+    lis.close().await;
+    drop(chan);
+    println!("waiting 2s");
+    sleep(std::time::Duration::from_secs(2)).await;
+    println!("done");
 }

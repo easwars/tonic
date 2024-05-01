@@ -23,7 +23,7 @@ impl Server {
         self.handler = Some(f)
     }
 
-    pub async fn serve(&self, l: impl Listener) {
+    pub async fn serve(&self, l: &impl Listener) {
         while let Some((req, reply_on)) = l.accept().await {
             dbg!("got req:", &req);
             reply_on

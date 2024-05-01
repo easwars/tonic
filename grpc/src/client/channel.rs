@@ -95,7 +95,7 @@ struct Inner {
     target: Url,
     cur_state: Mutex<ConnectivityState>,
     lb: Mutex<Option<Box<dyn load_balancing::Policy>>>,
-    picker: PickerWrapper,
+    picker: Watcher<Box<load_balancing::Picker>>,
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -120,12 +120,16 @@ impl Channel {
         }
     }
     // Waits until all outstanding RPCs are completed, then stops the client
-    // (via "drop"?).
+    // (via "drop"?).  Note that there probably needs to be a way to add a
+    // timeout here or for the application to do a hard failure while waiting.
+    // Or maybe this feature isn't necessary - Go doesn't have it.  Users can
+    // determine on their own if they have outstanding calls.  Some users have
+    // requested this feature for Go, nonetheless.
     pub async fn graceful_stop(self) {}
 
     // Causes the channel to enter idle mode immediately.  Any pending RPCs
     // will continue on existing connections.
-    // TODO: do we want this?
+    // TODO: do we want this?  Go does not have this.
     //pub async fn enter_idle(&self) {}
 
     /// Returns the current state of the channel.
@@ -134,7 +138,8 @@ impl Channel {
     }
 
     /// Waits for the state of the channel to change from source.  Times out and returns an error after the deadline.
-    // TODO: do we want this or another API based on streaming?
+    // TODO: do we want this or another API based on streaming?  Probably
+    // something like the Watcher<T> would be nice.
     pub async fn wait_for_state_change(
         &self,
         source: ConnectivityState,
@@ -157,12 +162,19 @@ impl Channel {
                 Box::new(self.inner.clone()),
                 name_resolution::ResolverOptions::default(),
             );
-            let slf = self.clone();
+            // TODO: save resolver in field.
         }
         return; // TODO
     }
     async fn wait_for_resolver_update(&self) {
         return; // TODO
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        println!("CHANNEL dropped");
+        self.inner.lb.lock().unwrap().take();
     }
 }
 
@@ -175,19 +187,33 @@ impl Inner {
         runtime: Option<Box<dyn rt::Runtime>>,
         options: ChannelOptions,
     ) -> Self {
-        Self {
+        let i = Self {
             target: Url::from_str(target).unwrap(), // TODO handle err
             cur_state: Mutex::new(ConnectivityState::Idle),
             lb: Mutex::new(None),
-            picker: PickerWrapper::new(),
-        }
+            picker: Watcher::new(),
+        };
+        let mut p = i.picker.iter();
+        tokio::task::spawn(async move {
+            loop {
+                println!("***** awaiting in loop");
+                let pi = p.next().await;
+                println!("***** next returned to loop");
+                if pi.is_none() {
+                    println!("***** got empty picker in loop (so err; exiting)");
+                    return;
+                }
+                println!("***** got a picker in loop");
+            }
+        });
+        i
     }
 
-    fn update_lb(self: &Arc<Self>, state: name_resolution::State) {
+    fn update_lb(self: &Arc<Self>, state: name_resolution::State) -> Result<(), String> {
         let policy_name = pick_first::POLICY_NAME;
         if state.service_config != name_resolution::TODO {
             // TODO: figure out lb policy name and config
-            todo!();
+            return Err(String::from("can't do service configs yet"));
         }
         let mut p = self.lb.lock().unwrap();
         match &*p {
@@ -198,12 +224,13 @@ impl Inner {
                     .build(self.clone(), load_balancing::TODO);
                 *p = Some(newpol);
             }
-            _ => {}
+            _ => { /* TODO */ }
         };
         p.as_deref_mut().unwrap().resolver_update(ResolverUpdate {
             update: Ok(state),
             config: load_balancing::TODO,
         });
+        Ok(())
         // TODO: close old LB policy gracefully vs. drop?
     }
 }
@@ -213,11 +240,18 @@ impl name_resolution::Channel for Arc<Inner> {
         todo!()
     }
 
-    fn update(&self, update: name_resolution::Update) {
+    fn update(&self, update: name_resolution::Update) -> Result<(), String> {
         if let Ok(state) = update {
             println!("got update: {:?}", state);
-            self.clone().update_lb(state);
-        } // TODO: handle error
+            return self.update_lb(state);
+        }
+        Err(String::from("TODO: handle error in update"))
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        println!("INNER dropped");
     }
 }
 
@@ -261,38 +295,54 @@ impl Service for Channel {
     }
 }
 
-struct PickerWrapper {
-    tx: watch::Sender<Option<Arc<Box<load_balancing::Picker>>>>,
-    rx: watch::Receiver<Option<Arc<Box<load_balancing::Picker>>>>,
-}
-struct PickerWrapperIter {
-    rx: watch::Receiver<Option<Arc<Box<load_balancing::Picker>>>>,
+// Enables multiple receivers to view data output from a single producer.
+// Producer calls update.  Consumers call iter() and call next() until they find
+// a good value or encounter None.
+struct Watcher<T> {
+    tx: watch::Sender<Option<Arc<T>>>,
+    rx: watch::Receiver<Option<Arc<T>>>,
 }
 
-impl PickerWrapper {
+struct WatcherIter<T> {
+    rx: watch::Receiver<Option<Arc<T>>>,
+}
+
+impl<T> Watcher<T> {
     fn new() -> Self {
         let (tx, rx) = watch::channel(None);
         Self { tx, rx }
     }
 
-    fn iter(&self) -> PickerWrapperIter {
+    fn iter(&self) -> WatcherIter<T> {
         let mut rx = self.rx.clone();
         rx.mark_changed();
-        PickerWrapperIter {
-            rx: self.rx.clone(),
-        }
+        WatcherIter { rx }
     }
 
-    fn update(&self, picker: Box<load_balancing::Picker>) {
-        println!("updating picker");
-        self.tx.send(Some(Arc::new(picker))).unwrap();
+    fn update(&self, item: T) {
+        self.tx.send(Some(Arc::new(item))).unwrap();
     }
 }
 
-impl PickerWrapperIter {
-    async fn next(&mut self) -> Option<Arc<Box<load_balancing::Picker>>> {
-        self.rx.changed().await.ok()?;
-        let x = self.rx.borrow_and_update();
-        x.clone()
+impl<T> Drop for Watcher<T> {
+    fn drop(&mut self) {
+        println!("WATCHER dropped")
+    }
+}
+
+impl<T> WatcherIter<T> {
+    // next returns None when the Watcher is dropped.
+    async fn next(&mut self) -> Option<Arc<T>> {
+        println!("next called");
+        loop {
+            println!("next looping start");
+            self.rx.changed().await.ok()?;
+            println!("next unblocked");
+            let x = self.rx.borrow_and_update();
+            if x.is_some() {
+                println!("next returning");
+                return x.clone();
+            }
+        }
     }
 }

@@ -45,7 +45,7 @@ pub static GLOBAL_REGISTRY: Lazy<Registry> = Lazy::new(|| Registry::new());
 pub trait Channel {
     fn parse_service_config(&self, config: String) -> TODO;
     /// Consumes an update from the name resolver.
-    fn update(&self, update: Update);
+    fn update(&self, update: Update) -> Result<(), String>;
 }
 
 /// A name resolver factory

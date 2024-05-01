@@ -58,6 +58,12 @@ impl Policy {
     }
 }
 
+impl Drop for Policy {
+    fn drop(&mut self) {
+        println!("PICK_FIRST dropped")
+    }
+}
+
 impl lb::Policy for Policy {
     fn resolver_update(&mut self, update: lb::ResolverUpdate) {
         if let Ok(u) = update.update {

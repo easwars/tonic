@@ -8,11 +8,7 @@ use once_cell::sync::Lazy;
 use crate::service::Service;
 
 pub trait Transport: Send + Sync {
-    fn connect(&self, address: String) -> Result<Box<dyn ConnectedTransport>, String>;
-}
-
-pub trait ConnectedTransport: Send + Sync {
-    fn get_service(&self) -> Result<Box<dyn Service>, String>;
+    fn connect(&self, address: String) -> Result<Box<dyn Service>, String>;
 }
 
 /// A registry to store and retrieve transports.  Transports are indexed by

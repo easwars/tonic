@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use tonic::async_trait;
 
@@ -9,8 +10,24 @@ use crate::service::{Request, Response, Service};
 
 pub(crate) struct Subchannel {
     t: Arc<Box<dyn transport::Transport>>,
-    ct: Arc<Mutex<Option<Arc<Box<dyn transport::ConnectedTransport>>>>>,
+    state: Mutex<State>,
     address: String,
+}
+
+enum State {
+    Idle,
+    Connecting,
+    Ready(Arc<Box<dyn Service>>),
+    TransientFailure(Instant),
+}
+
+impl State {
+    fn connected_transport(&self) -> Option<Arc<Box<dyn Service>>> {
+        match self {
+            Self::Ready(t) => Some(t.clone()),
+            _ => None,
+        }
+    }
 }
 
 impl Subchannel {
@@ -18,7 +35,7 @@ impl Subchannel {
     pub fn new(t: Arc<Box<dyn transport::Transport>>, address: String) -> Self {
         Subchannel {
             t,
-            ct: Arc::new(Mutex::new(None)),
+            state: Mutex::new(State::Idle),
             address,
         }
     }
@@ -35,11 +52,21 @@ impl Subchannel {
     }
 }
 
+// TODO: this should be a wrapper type that allows sharing the real subchannel
+// between LB policies.
 impl load_balancing::Subchannel for Subchannel {
     fn connect(&self) {
-        let mut ct = self.ct.lock().unwrap();
-        if ct.is_none() {
-            *ct = Some(Arc::new(self.t.connect(self.address.clone()).unwrap()));
+        let mut state = self.state.lock().unwrap();
+        match &*state {
+            State::Idle => {
+                *state = State::Ready(Arc::new(
+                    self.t
+                        .connect(self.address.clone())
+                        .expect("todo: handle error"),
+                ))
+            }
+            State::TransientFailure(_) => {} // TODO: remember connect request and skip Idle when expires
+            _ => {}
         }
     }
 
@@ -47,13 +74,13 @@ impl load_balancing::Subchannel for Subchannel {
         &self,
         updates: Box<dyn Fn(super::ConnectivityState) + Send + Sync>, // TODO: stream/asynciter/channel probably
     ) {
+        // TODO: don't go immediately ready.
         updates(super::ConnectivityState::Ready);
-        // TODO
     }
 
     fn shutdown(&self) {
-        // Drop the connected transport, if there is one.
-        self.ct.lock().unwrap().take();
+        // Transition to idle.
+        *self.state.lock().unwrap() = State::Idle;
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -63,8 +90,13 @@ impl load_balancing::Subchannel for Subchannel {
 #[async_trait]
 impl Service for Subchannel {
     async fn call(&self, request: Request) -> Response {
-        let ct = self.ct.lock().unwrap().as_ref().unwrap().clone();
-        let svc: Box<dyn Service> = ct.get_service().unwrap();
+        let svc = self
+            .state
+            .lock()
+            .unwrap()
+            .connected_transport()
+            .expect("todo: handle !ready")
+            .clone();
         svc.call(request).await
     }
 }
