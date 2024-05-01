@@ -69,7 +69,7 @@ pub trait Channel: Send + Sync {
 /// An LB policy factory
 pub trait Builder: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
-    fn build(&self, channel: Arc<dyn Channel>, options: TODO) -> Box<dyn Policy>;
+    fn build(&self, channel: Box<dyn Channel>, options: TODO) -> Box<dyn Policy>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
 }

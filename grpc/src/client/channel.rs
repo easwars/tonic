@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use std::vec;
 
@@ -159,7 +159,7 @@ impl Channel {
             let rb = name_resolution::GLOBAL_REGISTRY.get_scheme(self.inner.target.scheme());
             let resolver = rb.unwrap().make_resolver(
                 self.inner.target.clone(),
-                Box::new(self.inner.clone()),
+                Box::new(Arc::downgrade(&self.inner)),
                 name_resolution::ResolverOptions::default(),
             );
             // TODO: save resolver in field.
@@ -221,7 +221,7 @@ impl Inner {
                 let newpol = load_balancing::GLOBAL_REGISTRY
                     .get_policy(policy_name)
                     .unwrap()
-                    .build(self.clone(), load_balancing::TODO);
+                    .build(Box::new(Arc::downgrade(self)), load_balancing::TODO);
                 *p = Some(newpol);
             }
             _ => { /* TODO */ }
@@ -235,7 +235,7 @@ impl Inner {
     }
 }
 
-impl name_resolution::Channel for Arc<Inner> {
+impl name_resolution::Channel for Weak<Inner> {
     fn parse_service_config(&self, config: String) -> name_resolution::TODO {
         todo!()
     }
@@ -243,7 +243,7 @@ impl name_resolution::Channel for Arc<Inner> {
     fn update(&self, update: name_resolution::Update) -> Result<(), String> {
         if let Ok(state) = update {
             println!("got update: {:?}", state);
-            return self.update_lb(state);
+            return self.upgrade().ok_or("channel closed")?.update_lb(state);
         }
         Err(String::from("TODO: handle error in update"))
     }
@@ -255,7 +255,7 @@ impl Drop for Inner {
     }
 }
 
-impl load_balancing::Channel for Inner {
+impl load_balancing::Channel for Weak<Inner> {
     fn new_subchannel(
         &self,
         address: Arc<name_resolution::Address>,
@@ -268,7 +268,7 @@ impl load_balancing::Channel for Inner {
 
     fn update_state(&self, update: load_balancing::Update) {
         let u = update.unwrap();
-        self.picker.update(u.picker);
+        self.upgrade().unwrap().picker.update(u.picker);
     }
 }
 

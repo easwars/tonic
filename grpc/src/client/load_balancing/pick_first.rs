@@ -15,9 +15,9 @@ pub static POLICY_NAME: &str = "pick_first";
 struct Builder {}
 
 impl lb::Builder for Builder {
-    fn build(&self, channel: Arc<dyn lb::Channel>, options: lb::TODO) -> Box<dyn lb::Policy> {
+    fn build(&self, channel: Box<dyn lb::Channel>, options: lb::TODO) -> Box<dyn lb::Policy> {
         Box::new(Policy {
-            ch: channel,
+            ch: Arc::new(channel),
             sc: None,
         })
     }
@@ -33,7 +33,7 @@ pub fn reg() {
 
 #[derive(Clone)]
 struct Policy {
-    ch: Arc<dyn lb::Channel>,
+    ch: Arc<Box<dyn lb::Channel>>,
     sc: Option<Arc<dyn Subchannel>>,
 }
 
