@@ -1,7 +1,6 @@
 use grpc::client::load_balancing::pick_first;
 use grpc::service::{Request, Response, Service};
 use grpc::{client::ChannelOptions, inmemory};
-use tokio::time::sleep;
 use tonic::async_trait;
 
 struct Handler {}
@@ -31,11 +30,5 @@ async fn main() {
     let req = Request::new("hi".to_string(), None);
     let res = chan.call(req).await;
     println!("CALL RESPONSE: {:?}", res);
-    println!("waiting 2s");
-    sleep(std::time::Duration::from_secs(2)).await;
     lis.close().await;
-    drop(chan);
-    println!("waiting 2s");
-    sleep(std::time::Duration::from_secs(2)).await;
-    println!("done");
 }

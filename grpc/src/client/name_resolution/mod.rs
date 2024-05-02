@@ -1,9 +1,11 @@
 use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
+    error::Error,
     fmt::Display,
     sync::{Arc, Mutex},
 };
+use tokio::sync::oneshot;
 use tonic::async_trait;
 use url::Url;
 
@@ -77,7 +79,12 @@ pub trait ResolverBuilder: Send + Sync {
     }
 }
 
-pub type Update = Result<State, String>;
+pub enum ResolverUpdate {
+    Err(Box<dyn Error + Send + Sync>), // The name resolver encountered an error.
+    Data((ResolverData, ResolverDataResponse)), // The name resolver produced a result.
+}
+
+pub type ResolverDataResponse = oneshot::Sender<Result<(), Box<dyn Error + Send + Sync>>>;
 
 #[derive(Debug, Default)]
 #[non_exhaustive]
@@ -88,9 +95,9 @@ pub struct ResolverOptions {
 /// Data provided by the name resolver
 #[derive(Debug)]
 #[non_exhaustive]
-pub struct State {
+pub struct ResolverData {
     pub endpoints: Vec<Endpoint>,
-    pub service_config: TODO,
+    pub service_config: String,
     // Contains optional data which can be used by the LB Policy or channel.
     pub attributes: Attributes,
 }
@@ -124,5 +131,5 @@ pub static TCP_IP_ADDRESS_TYPE: &str = "tcp";
 #[async_trait]
 pub trait Resolver: Send + Sync {
     fn resolve_now(&self);
-    async fn update(&self) -> Update;
+    async fn update(&self) -> ResolverUpdate;
 }

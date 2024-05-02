@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use std::vec;
 
@@ -13,13 +13,13 @@ use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::load_balancing::{pick_first, ResolverUpdate};
+use super::load_balancing::{pick_first, PolicyUpdate};
 use super::name_resolution::ResolverBuilder;
 use super::subchannel::Subchannel;
 use super::{load_balancing, name_resolution, transport};
 
 #[non_exhaustive]
-pub struct ChannelOptions<'a> {
+pub struct ChannelOptions {
     pub transport_options: Attributes, // ?
     pub override_authority: Option<String>,
     pub connection_backoff: Option<TODO>,
@@ -30,7 +30,7 @@ pub struct ChannelOptions<'a> {
     pub max_retry_memory: u32, // ?
     pub idle_timeout: Duration,
     pub transport_registry: Option<super::transport::Registry>,
-    pub name_resolver_registry: Option<super::load_balancing::Registry<'a>>,
+    pub name_resolver_registry: Option<super::load_balancing::Registry>,
     pub lb_policy_registry: Option<super::name_resolution::ResolverRegistry>,
 
     // Typically we allow settings at the channel level that impact all RPCs,
@@ -52,7 +52,7 @@ pub struct ChannelOptions<'a> {
     pub default_request_extensions: Vec<Box<TODO>>, // ??
 }
 
-impl<'a> Default for ChannelOptions<'a> {
+impl Default for ChannelOptions {
     fn default() -> Self {
         Self {
             transport_options: Attributes::new(),
@@ -72,7 +72,7 @@ impl<'a> Default for ChannelOptions<'a> {
     }
 }
 
-impl<'a> ChannelOptions<'a> {
+impl ChannelOptions {
     pub fn transport_options(self, transport_options: TODO) -> Self {
         todo!(); // add to existing options.
     }
@@ -94,8 +94,8 @@ pub struct Channel {
 
 struct Inner {
     target: Url,
-    cur_state: Mutex<ConnectivityState>,
-    lb: Mutex<Option<Box<dyn load_balancing::Policy>>>,
+    cur_state: tokio::sync::Mutex<ConnectivityState>,
+    lb: tokio::sync::Mutex<Option<Box<dyn load_balancing::Policy>>>,
     picker: Watcher<Box<load_balancing::Picker>>,
 }
 
@@ -135,7 +135,7 @@ impl Channel {
 
     /// Returns the current state of the channel.
     pub fn state(&mut self, connect: bool) -> ConnectivityState {
-        *self.inner.cur_state.lock().unwrap()
+        *self.inner.cur_state.blocking_lock()
     }
 
     /// Waits for the state of the channel to change from source.  Times out and returns an error after the deadline.
@@ -150,13 +150,9 @@ impl Channel {
     }
 
     async fn wake_if_idle(&self) {
-        let mut s = self.inner.cur_state.lock().unwrap();
+        let mut s = self.inner.cur_state.lock().await;
         if *s == ConnectivityState::Idle {
             *s = ConnectivityState::Connecting;
-            println!(
-                "creating resolver for scheme: {}",
-                self.inner.target.scheme()
-            );
             let rb = name_resolution::GLOBAL_REGISTRY.get_scheme(self.inner.target.scheme());
             let resolver = rb.unwrap().build(
                 self.inner.target.clone(),
@@ -167,11 +163,13 @@ impl Channel {
                 // TODO: terminate this task when we go idle.
                 loop {
                     let update = resolver.update().await;
-                    if let Ok(state) = update {
-                        println!("got update: {:?}", state);
-                        return inner.update_lb(state);
+                    if let name_resolution::ResolverUpdate::Data((state, tx)) = update {
+                        // TODO: intercept tx?
+                        inner
+                            .update_lb(name_resolution::ResolverUpdate::Data((state, tx)))
+                            .await;
+                        continue;
                     }
-                    panic!("TODO: handle error in update");
                 }
             });
             // TODO: save resolver in field.
@@ -180,13 +178,6 @@ impl Channel {
     }
     async fn wait_for_resolver_update(&self) {
         return; // TODO
-    }
-}
-
-impl Drop for Channel {
-    fn drop(&mut self) {
-        println!("CHANNEL dropped");
-        self.inner.lb.lock().unwrap().take();
     }
 }
 
@@ -199,35 +190,26 @@ impl Inner {
         runtime: Option<Box<dyn rt::Runtime>>,
         options: ChannelOptions,
     ) -> Self {
-        let i = Self {
+        Self {
             target: Url::from_str(target).unwrap(), // TODO handle err
-            cur_state: Mutex::new(ConnectivityState::Idle),
-            lb: Mutex::new(None),
+            cur_state: tokio::sync::Mutex::new(ConnectivityState::Idle),
+            lb: tokio::sync::Mutex::new(None),
             picker: Watcher::new(),
-        };
-        let mut p = i.picker.iter();
-        tokio::task::spawn(async move {
-            loop {
-                println!("***** awaiting in loop");
-                let pi = p.next().await;
-                println!("***** next returned to loop");
-                if pi.is_none() {
-                    println!("***** got empty picker in loop (so err; exiting)");
-                    return;
-                }
-                println!("***** got a picker in loop");
-            }
-        });
-        i
+        }
     }
 
-    fn update_lb(self: &Arc<Self>, state: name_resolution::State) -> Result<(), String> {
+    async fn update_lb(self: &Arc<Self>, state: name_resolution::ResolverUpdate) {
         let policy_name = pick_first::POLICY_NAME;
-        if state.service_config != name_resolution::TODO {
-            // TODO: figure out lb policy name and config
-            return Err(String::from("can't do service configs yet"));
+        let name_resolution::ResolverUpdate::Data((update, tx)) = state else {
+            todo!("unhandled update type");
+        };
+        if update.service_config != "" {
+            let _ = tx.send(Err("can't do service configs yet".into()));
+            return;
         }
-        let mut p = self.lb.lock().unwrap();
+        // TODO: figure out lb policy name and config
+
+        let mut p = self.lb.lock().await;
         match &*p {
             None => {
                 let newpol = load_balancing::GLOBAL_REGISTRY
@@ -238,27 +220,14 @@ impl Inner {
             }
             _ => { /* TODO */ }
         };
-        p.as_deref_mut().unwrap().resolver_update(ResolverUpdate {
-            update: Ok(state),
-            config: load_balancing::TODO,
-        });
-        Ok(())
+        p.as_deref_mut()
+            .unwrap()
+            .update(PolicyUpdate {
+                update: name_resolution::ResolverUpdate::Data((update, tx)),
+                config: super::load_balancing::TODO,
+            })
+            .await;
         // TODO: close old LB policy gracefully vs. drop?
-    }
-}
-/*
-impl name_resolution::Channel for Weak<Inner> {
-    fn parse_service_config(&self, config: String) -> name_resolution::TODO {
-        todo!()
-    }
-
-    fn update(&self, update: name_resolution::Update) -> Result<(), String> {
-    }
-}*/
-
-impl Drop for Inner {
-    fn drop(&mut self) {
-        println!("INNER dropped");
     }
 }
 
@@ -288,12 +257,9 @@ impl Service for Channel {
         // start attempt
         // pick subchannel
         // perform attempt on transport
-        println!("performing call?");
         let mut i = self.inner.picker.iter();
         loop {
-            println!("pick ?");
             if let Some(p) = i.next().await {
-                println!("got picker");
                 let sc = p(&request).unwrap();
                 let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
                 return sc.call(request).await;

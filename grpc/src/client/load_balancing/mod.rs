@@ -5,11 +5,14 @@ use std::{
     error::Error,
     sync::{Arc, Mutex},
 };
-use tonic::metadata::MetadataMap;
+use tonic::{async_trait, metadata::MetadataMap};
 
 use crate::service::{Request, Response};
 
-use super::{name_resolution::Address, ConnectivityState};
+use super::{
+    name_resolution::{Address, ResolverUpdate},
+    ConnectivityState,
+};
 
 pub mod pick_first;
 
@@ -17,11 +20,11 @@ pub struct TODO;
 
 /// A registry to store and retrieve LB policies.  LB policies are indexed by
 /// their names.
-pub struct Registry<'a> {
-    m: Arc<Mutex<HashMap<String, &'a (dyn Builder)>>>,
+pub struct Registry {
+    m: Arc<Mutex<HashMap<String, Arc<dyn Builder>>>>,
 }
 
-impl<'a> Registry<'a> {
+impl Registry {
     /// Construct an empty LB policy registry.
     pub fn new() -> Self {
         Self {
@@ -29,15 +32,15 @@ impl<'a> Registry<'a> {
         }
     }
     /// Add a LB policy into the registry.
-    pub fn add_builder(&self, builder: &'a impl Builder) {
+    pub fn add_builder(&self, builder: impl Builder + 'static) {
         self.m
             .lock()
             .unwrap()
-            .insert(builder.name().to_string(), builder);
+            .insert(builder.name().to_string(), Arc::new(builder));
     }
     /// Retrieve a LB policy from the registry, or None if not found.
-    pub fn get_policy(&self, name: &str) -> Option<&(dyn Builder)> {
-        self.m.lock().unwrap().get(name).map(|&f| f)
+    pub fn get_policy(&self, name: &str) -> Option<Arc<dyn Builder>> {
+        self.m.lock().unwrap().get(name).map(|f| f.clone())
     }
 }
 
@@ -89,11 +92,12 @@ pub struct Pick {
     pub metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
 }
 
-pub struct ResolverUpdate {
-    pub update: super::name_resolution::Update,
+pub struct PolicyUpdate {
+    pub update: ResolverUpdate,
     pub config: TODO, // LB policy's parsed config
 }
 
+#[async_trait]
 pub trait Policy: Send + Sync {
-    fn resolver_update(&mut self, update: ResolverUpdate);
+    async fn update(&self, update: PolicyUpdate);
 }

@@ -1,11 +1,13 @@
-use std::{error::Error, mem, sync::Arc};
+use std::{
+    mem,
+    sync::{Arc, Mutex},
+};
 
-use crate::{
-    client::{
-        load_balancing::{self as lb, State},
-        ConnectivityState,
-    },
-    service::Request,
+use tonic::async_trait;
+
+use crate::client::{
+    load_balancing::{self as lb, State},
+    name_resolution, ConnectivityState,
 };
 
 use super::{Pick, Subchannel};
@@ -18,7 +20,7 @@ impl lb::Builder for Builder {
     fn build(&self, channel: Box<dyn lb::Channel>, options: lb::TODO) -> Box<dyn lb::Policy> {
         Box::new(Policy {
             ch: Arc::new(channel),
-            sc: None,
+            sc: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -28,64 +30,50 @@ impl lb::Builder for Builder {
 }
 
 pub fn reg() {
-    super::GLOBAL_REGISTRY.add_builder(&Builder {})
+    super::GLOBAL_REGISTRY.add_builder(Builder {})
 }
 
 #[derive(Clone)]
 struct Policy {
     ch: Arc<Box<dyn lb::Channel>>,
-    sc: Option<Arc<dyn Subchannel>>,
+    sc: Arc<Mutex<Option<Arc<dyn Subchannel>>>>,
 }
 
-impl Policy {
-    fn pick(&self, _r: &Request) -> Result<Pick, Box<dyn Error>> {
-        Ok(Pick {
-            subchannel: self.sc.clone().unwrap(),
-            on_complete: None,
-            metadata: None,
-        })
-    }
-    fn update(&self, s: ConnectivityState) {
-        println!("lb update called: {s:?} -- sc? {}", self.sc.is_some());
-        let sc = self.sc.clone();
-        if s == ConnectivityState::Ready {
-            let slf = self.clone();
-            self.ch.update_state(Ok(Box::new(State {
-                connectivity_state: s,
-                picker: Box::new(move |v| slf.pick(v)),
-            })));
-        }
-    }
-}
-
-impl Drop for Policy {
-    fn drop(&mut self) {
-        println!("PICK_FIRST dropped")
-    }
-}
-
+#[async_trait]
 impl lb::Policy for Policy {
-    fn resolver_update(&mut self, update: lb::ResolverUpdate) {
-        if let Ok(u) = update.update {
+    async fn update(&self, update: lb::PolicyUpdate) {
+        if let name_resolution::ResolverUpdate::Data((u, tx)) = update.update {
             if let Some(e) = u.endpoints.into_iter().next() {
                 if let Some(a) = e.addresses.into_iter().next() {
                     let a = Arc::new(a);
                     let sc = self.ch.new_subchannel(a.clone());
-                    println!("prev sc: {}", self.sc.is_some());
-                    let old_sc = mem::replace(&mut self.sc, Some(sc.clone()));
-                    println!(
-                        "old_sc: {}, new sc: {}",
-                        old_sc.is_some(),
-                        self.sc.is_some()
-                    );
+                    let old_sc = mem::replace(&mut *self.sc.lock().unwrap(), Some(sc.clone()));
                     if let Some(o) = old_sc {
                         o.shutdown();
                     };
                     let slf = self.clone();
-                    sc.listen(Box::new(move |s| slf.update(s)));
+                    let sc2 = sc.clone();
+                    sc.listen(Box::new(move |s| {
+                        if s == ConnectivityState::Ready {
+                            let sc = sc2.clone();
+                            slf.ch.update_state(Ok(Box::new(State {
+                                connectivity_state: s,
+                                picker: Box::new(move |_v| {
+                                    Ok(Pick {
+                                        subchannel: sc.clone(),
+                                        on_complete: None,
+                                        metadata: None,
+                                    })
+                                }),
+                            })));
+                        }
+                    }));
                     sc.connect();
+                    let _ = tx.send(Ok(()));
+                    return;
                 }
             }
+            let _ = tx.send(Err("".into()));
         }
     }
 }
