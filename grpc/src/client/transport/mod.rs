@@ -5,16 +5,16 @@ use std::{
 
 use once_cell::sync::Lazy;
 
-use crate::service::Service;
+use crate::service::MessageService;
 
 pub trait Transport: Send + Sync {
-    fn connect(&self, address: String) -> Result<Box<dyn Service>, String>;
+    fn connect(&self, address: String) -> Result<Box<dyn MessageService>, String>;
 }
 
 /// A registry to store and retrieve transports.  Transports are indexed by
 /// the address type they are intended to handle.
 pub struct Registry {
-    m: Arc<Mutex<HashMap<String, Arc<Box<dyn Transport>>>>>,
+    m: Arc<Mutex<HashMap<String, Arc<dyn Transport>>>>,
 }
 
 impl std::fmt::Debug for Registry {
@@ -35,7 +35,7 @@ impl Registry {
         }
     }
     /// Add a name resolver into the registry.
-    pub fn add_transport(&self, address_type: String, transport: Box<dyn Transport>) {
+    pub fn add_transport(&self, address_type: String, transport: impl Transport + 'static) {
         //let a: Arc<dyn Any> = transport;
         //let a: Arc<dyn Transport<Addr = dyn Any>> = transport;
         self.m
@@ -44,7 +44,7 @@ impl Registry {
             .insert(address_type, Arc::new(transport));
     }
     /// Retrieve a name resolver from the registry, or None if not found.
-    pub fn get_transport(&self, address_type: &String) -> Result<Arc<Box<dyn Transport>>, String> {
+    pub fn get_transport(&self, address_type: &String) -> Result<Arc<dyn Transport>, String> {
         self.m
             .lock()
             .unwrap()

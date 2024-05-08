@@ -11,7 +11,7 @@ use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 use crate::attributes::Attributes;
 use crate::credentials::Credentials;
 use crate::rt;
-use crate::service::{Request, Response, Service};
+use crate::service::{Message, MessageService, Request, Response, Service};
 
 use super::load_balancing::{pick_first, PolicyUpdate};
 use super::name_resolution::ResolverBuilder;
@@ -249,11 +249,11 @@ impl load_balancing::Channel for Weak<Inner> {
 }
 
 #[async_trait]
-impl Service for Channel {
-    async fn call(&self, request: Request) -> Response {
+impl MessageService for Channel {
+    async fn call(&self, request: Request<Into<Message>>) -> Response<From<Message>> {
         self.wake_if_idle().await;
         self.wait_for_resolver_update().await;
-        // pre-pick tasks (e.g. interceptor)
+        // pre-pick tasks (e.g. interceptor, retry)
         // start attempt
         // pick subchannel
         // perform attempt on transport

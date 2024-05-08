@@ -13,7 +13,7 @@ use crate::{
         transport,
     },
     server,
-    service::{Request, Response, Service},
+    service::{Message, MessageService, Request, Response},
 };
 use once_cell::sync::Lazy;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -55,8 +55,8 @@ impl Drop for Listener {
 }
 
 #[async_trait]
-impl Service for Arc<Listener> {
-    async fn call(&self, request: Request) -> Response {
+impl MessageService for Arc<Listener> {
+    async fn call(&self, request: Request<Box<dyn Message>>) -> Response<Box<dyn Message>> {
         // 1. unblock accept, giving it a func back to me
         // 2. return what that func had
         let (s, r) = oneshot::channel();
@@ -90,7 +90,7 @@ impl ClientTransport {
 }
 
 impl transport::Transport for ClientTransport {
-    fn connect(&self, address: String) -> Result<Box<dyn Service>, String> {
+    fn connect(&self, address: String) -> Result<Box<dyn MessageService>, String> {
         Ok(Box::new(
             LISTENERS
                 .lock()
@@ -106,10 +106,8 @@ static INMEMORY_ADDRESS_TYPE: &str = "inmemory";
 
 pub fn reg() {
     dbg!("Registering inmemory::ClientTransport");
-    transport::GLOBAL_REGISTRY.add_transport(
-        INMEMORY_ADDRESS_TYPE.to_string(),
-        Box::new(ClientTransport::new()),
-    );
+    transport::GLOBAL_REGISTRY
+        .add_transport(INMEMORY_ADDRESS_TYPE.to_string(), ClientTransport::new());
     name_resolution::GLOBAL_REGISTRY
         .add_builder(SharedResolverBuilder::new(InMemoryResolverBuilder));
 }

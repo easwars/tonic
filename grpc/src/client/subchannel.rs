@@ -6,23 +6,25 @@ use tonic::async_trait;
 
 use super::load_balancing;
 use crate::client::transport;
-use crate::service::{Request, Response, Service};
+use crate::service::{Message, MessageService, Request, Response, Service};
 
 pub(crate) struct Subchannel {
-    t: Arc<Box<dyn transport::Transport>>,
+    t: Arc<dyn transport::Transport>,
     state: Mutex<State>,
     address: String,
 }
 
+type SharedService = Arc<dyn MessageService>;
+
 enum State {
     Idle,
     Connecting,
-    Ready(Arc<Box<dyn Service>>),
+    Ready(SharedService),
     TransientFailure(Instant),
 }
 
 impl State {
-    fn connected_transport(&self) -> Option<Arc<Box<dyn Service>>> {
+    fn connected_transport(&self) -> Option<SharedService> {
         match self {
             Self::Ready(t) => Some(t.clone()),
             _ => None,
@@ -32,7 +34,7 @@ impl State {
 
 impl Subchannel {
     /// Creates a new subchannel in idle state.
-    pub fn new(t: Arc<Box<dyn transport::Transport>>, address: String) -> Self {
+    pub fn new(t: Arc<dyn transport::Transport>, address: String) -> Self {
         Subchannel {
             t,
             state: Mutex::new(State::Idle),
@@ -59,11 +61,12 @@ impl load_balancing::Subchannel for Subchannel {
         let mut state = self.state.lock().unwrap();
         match &*state {
             State::Idle => {
-                *state = State::Ready(Arc::new(
+                *state = State::Ready(
                     self.t
                         .connect(self.address.clone())
-                        .expect("todo: handle error"),
-                ))
+                        .expect("todo: handle error")
+                        .into(),
+                )
             }
             State::TransientFailure(_) => {} // TODO: remember connect request and skip Idle when expires
             _ => {}
@@ -88,8 +91,9 @@ impl load_balancing::Subchannel for Subchannel {
 }
 
 #[async_trait]
-impl Service for Subchannel {
-    async fn call(&self, request: Request) -> Response {
+impl Service<Box<dyn Message>> for Subchannel {
+    type ResMsg = Box<dyn Message>;
+    async fn call(&self, request: Request<Box<dyn Message>>) -> Response<Box<dyn Message>> {
         let svc = self
             .state
             .lock()

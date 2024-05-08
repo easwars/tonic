@@ -1,3 +1,6 @@
+use std::{any::Any, time::Instant};
+
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tonic::async_trait;
 
 #[derive(Debug)]
@@ -10,8 +13,32 @@ struct TODO;
 //
 // Or can/should we use tonic's types (Service/Req/Res) directly?
 #[async_trait]
-pub trait Service: Send + Sync {
-    async fn call(&self, request: Request) -> Response;
+pub trait Service<ReqMsg>: Send + Sync {
+    type ResMsg;
+    async fn call(&self, request: Request<ReqMsg>) -> Response<Self::ResMsg>;
+}
+
+#[async_trait]
+pub trait MessageService: Send + Sync {
+    async fn call(&self, request: Request<Box<dyn Message>>) -> Response<Box<dyn Message>>;
+}
+
+/*
+#[async_trait]
+impl MessageService for dyn Service<Box<dyn Message>, ResMsg = Box<dyn Message>> {
+    async fn call(&self, request: Request<Box<dyn Message>>) -> Response<Box<dyn Message>> {
+        todo!()
+    }
+}
+*/
+
+#[async_trait]
+impl<Req, Res> MessageService for dyn Service<Req, ResMsg = Res> {
+    async fn call(&self, request: Request<Box<dyn Message>>) -> Response<Box<dyn Message>> {
+        // wrap Request so that next() calls
+        let (x, y) = Response::new();
+        x
+    }
 }
 
 // TODO: are requests and responses different on client and server?  or do they
@@ -20,51 +47,79 @@ pub trait Service: Send + Sync {
 // stream/messages are different: the client can write request messages where
 // the server can only read them, and vice-versa.
 #[derive(Debug)]
-pub struct Request {
+pub struct Request<Req> {
     pub method: String,
-    /*    stream: TODO, // A way to send/receive request messages.
-
+    rx: Receiver<Req>,
     // Should all of the below optional things be "extensions"?
-    metadata: MetadataMap,
+    /*metadata: MetadataMap,
     deadline: Option<Instant>,
     compressor: Option<String>,
-    wait_for_ready: bool,
-    */
+    wait_for_ready: bool,*/
 }
 
-impl Request {
-    pub fn new(method: String, parent: Option<Request>) -> Self {
-        Self {
-            method,
-            /*      stream: TODO,
-            metadata: MetadataMap::new(),
-            deadline: parent.and_then(|p| p.deadline),
-            compressor: None,
-            wait_for_ready: false,*/
-        }
-    }
-    /*
-    pub fn set_timeout(self, timeout: Duration) -> Self {
-        Self {
-            deadline: Some(Instant::now() + timeout),
-            ..self
-        }
-    }*/
+pub trait ParentRequest {
+    fn deadline(&self) -> Instant;
 }
+
+impl<Req: Message> Request<Req> {
+    pub fn new(method: String, parent: Option<&dyn ParentRequest>) -> (Self, Sender<Req>) {
+        let (tx, rx) = mpsc::channel(1);
+        (Self { method, rx }, tx)
+    }
+    pub async fn next(&mut self) -> Option<Req> {
+        self.rx.recv().await
+    }
+    fn headers(&mut self) -> Headers {
+        Headers {}
+    }
+}
+
+impl Request<Box<dyn Message>> {}
 
 #[derive(Debug)]
-pub struct Response {
-    //stream: TODO, // A way to stream headers, messages, and status/trailers.
-    msg: String,
+pub struct Response<Res> {
+    rx: Receiver<Res>, // TODO: include headers & trailers in one stream?
 }
 
-impl Response {
-    pub fn new() -> Self {
-        Response {
-            msg: String::from(""),
-        }
+// Client -> static msg type -> grpc (as dyn Message) -> Transport (as Box<dyn Message>) -> wire -> Transport (as Box<dyn Message>) -> grpc (as Box<dyn Message>) -> Server (as static Message type)
+// Are client-side and server-side view of requests and responses the same?
+// client can set things; server can view.  But that can be handled by the builder, and the request should be a const.
+// Server can also read things from it that the client can't, like the client's address.
+
+pub trait Message: Send {
+    fn as_any(&self) -> &dyn Any;
+    // TODO: to_bytes() or whatever
+    //fn into(self) -> Self;
+}
+pub struct Headers {}
+pub struct Trailers {}
+
+struct MessageBytes {}
+
+impl<Res: Message> Response<Res> {
+    pub fn new() -> (Self, Sender<Res>) {
+        let (tx, rx) = mpsc::channel(1);
+        (Self { rx }, tx)
     }
-    pub fn new_with_str(s: String) -> Self {
-        Response { msg: s }
+    pub async fn next(&mut self) -> Option<Res> {
+        self.rx.recv().await
+    }
+    pub async fn headers(&mut self) -> Headers {
+        Headers {}
+    }
+    pub async fn trailers(&mut self) -> Trailers {
+        Trailers {}
+    }
+}
+
+impl Into<Box<dyn Any>> for Box<dyn Message> {
+    fn into(self) -> Box<dyn Any> {
+        todo!()
+    }
+}
+
+impl Message for Box<dyn Message> {
+    fn as_any(&self) -> &dyn Any {
+        self.as_ref().as_any()
     }
 }

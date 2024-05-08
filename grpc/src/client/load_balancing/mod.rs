@@ -7,7 +7,7 @@ use std::{
 };
 use tonic::{async_trait, metadata::MetadataMap};
 
-use crate::service::{Request, Response};
+use crate::service::{Message, Request, Response};
 
 use super::{
     name_resolution::{Address, ResolverUpdate},
@@ -61,14 +61,6 @@ pub trait Subchannel: Send + Sync {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// This channel is a set of features the LB policy may use from the channel.
-pub trait Channel: Send + Sync {
-    /// Creates a new subchannel in idle state.
-    fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
-    /// Consumes an update from the LB Policy.
-    fn update_state(&self, update: Update);
-}
-
 /// An LB policy factory
 pub trait Builder: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
@@ -78,7 +70,7 @@ pub trait Builder: Send + Sync {
 }
 
 pub type Update = Result<Box<State>, Box<dyn Error>>;
-pub type Picker = dyn Fn(&Request) -> Result<Pick, Box<dyn Error>> + Send + Sync;
+pub type Picker = dyn Fn(&Request<Box<dyn Message>>) -> Result<Pick, Box<dyn Error>> + Send + Sync;
 
 /// Data provided by the LB policy.
 pub struct State {
@@ -88,7 +80,7 @@ pub struct State {
 
 pub struct Pick {
     pub subchannel: Arc<dyn Subchannel>,
-    pub on_complete: Option<Box<dyn FnOnce(Response) + Send + Sync>>,
+    pub on_complete: Option<Box<dyn FnOnce(Response<Box<dyn Message>>) + Send + Sync>>,
     pub metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
 }
 
@@ -100,4 +92,12 @@ pub struct PolicyUpdate {
 #[async_trait]
 pub trait Policy: Send + Sync {
     async fn update(&self, update: PolicyUpdate);
+}
+
+/// This channel is a set of features the LB policy may use from the channel.
+pub trait Channel: Send + Sync {
+    /// Creates a new subchannel in idle state.
+    fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
+    /// Consumes an update from the LB Policy.
+    fn update_state(&self, update: Update);
 }
