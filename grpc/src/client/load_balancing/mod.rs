@@ -7,7 +7,7 @@ use std::{
 };
 use tonic::{async_trait, metadata::MetadataMap};
 
-use crate::service::{Message, Request, Response};
+use crate::service::{Request, Response};
 
 use super::{
     name_resolution::{Address, ResolverUpdate},
@@ -70,7 +70,7 @@ pub trait Builder: Send + Sync {
 }
 
 pub type Update = Result<Box<State>, Box<dyn Error>>;
-pub type Picker = dyn Fn(&Request<Box<dyn Message>>) -> Result<Pick, Box<dyn Error>> + Send + Sync;
+pub type Picker = dyn Fn(&Request) -> Result<Pick, Box<dyn Error>> + Send + Sync;
 
 /// Data provided by the LB policy.
 pub struct State {
@@ -80,7 +80,7 @@ pub struct State {
 
 pub struct Pick {
     pub subchannel: Arc<dyn Subchannel>,
-    pub on_complete: Option<Box<dyn FnOnce(Response<Box<dyn Message>>) + Send + Sync>>,
+    pub on_complete: Option<Box<dyn FnOnce(&Response) + Send + Sync>>,
     pub metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
 }
 

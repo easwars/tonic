@@ -5,10 +5,10 @@ use std::{
 
 use once_cell::sync::Lazy;
 
-use crate::service::MessageService;
+use crate::service::Service;
 
 pub trait Transport: Send + Sync {
-    fn connect(&self, address: String) -> Result<Box<dyn MessageService>, String>;
+    fn connect(&self, address: String) -> Result<Box<dyn Service>, String>;
 }
 
 /// A registry to store and retrieve transports.  Transports are indexed by

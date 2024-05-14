@@ -6,7 +6,7 @@ use tonic::async_trait;
 
 use super::load_balancing;
 use crate::client::transport;
-use crate::service::{Message, MessageService, Request, Response, Service};
+use crate::service::{Request, Response, Service};
 
 pub(crate) struct Subchannel {
     t: Arc<dyn transport::Transport>,
@@ -14,7 +14,7 @@ pub(crate) struct Subchannel {
     address: String,
 }
 
-type SharedService = Arc<dyn MessageService>;
+type SharedService = Arc<dyn Service>;
 
 enum State {
     Idle,
@@ -91,9 +91,8 @@ impl load_balancing::Subchannel for Subchannel {
 }
 
 #[async_trait]
-impl Service<Box<dyn Message>> for Subchannel {
-    type ResMsg = Box<dyn Message>;
-    async fn call(&self, request: Request<Box<dyn Message>>) -> Response<Box<dyn Message>> {
+impl Service for Subchannel {
+    async fn call(&self, request: Request) -> Response {
         let svc = self
             .state
             .lock()

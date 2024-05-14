@@ -3,16 +3,13 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tonic::async_trait;
 
-use crate::service::{Message, MessageService, Request, Response};
+use crate::service::{Request, Response, Service};
 
 pub struct Server {
-    handler: Option<Arc<dyn MessageService>>,
+    handler: Option<Arc<dyn Service>>,
 }
 
-pub type Call = (
-    Request<Box<dyn Message>>,
-    oneshot::Sender<Response<Box<dyn Message>>>,
-);
+pub type Call = (Request, oneshot::Sender<Response>);
 
 #[async_trait]
 pub trait Listener {
@@ -24,7 +21,7 @@ impl Server {
         Self { handler: None }
     }
 
-    pub fn set_handler(&mut self, f: impl MessageService + 'static) {
+    pub fn set_handler(&mut self, f: impl Service + 'static) {
         self.handler = Some(Arc::new(f))
     }
 

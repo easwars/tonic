@@ -5,13 +5,12 @@ use std::time::{Duration, Instant};
 use std::vec;
 
 use tokio::sync::watch;
-use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
 use crate::attributes::Attributes;
 use crate::credentials::Credentials;
 use crate::rt;
-use crate::service::{Message, MessageService, Request, Response, Service};
+use crate::service::{Request, Response, Service};
 
 use super::load_balancing::{pick_first, PolicyUpdate};
 use super::name_resolution::ResolverBuilder;
@@ -179,6 +178,23 @@ impl Channel {
     async fn wait_for_resolver_update(&self) {
         return; // TODO
     }
+
+    pub async fn call(&self, request: Request) -> Response {
+        self.wake_if_idle().await;
+        self.wait_for_resolver_update().await;
+        // pre-pick tasks (e.g. interceptor, retry)
+        // start attempt
+        // pick subchannel
+        // perform attempt on transport
+        let mut i = self.inner.picker.iter();
+        loop {
+            if let Some(p) = i.next().await {
+                let sc = p(&request).unwrap();
+                let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
+                return sc.call(request).await;
+            }
+        }
+    }
 }
 
 impl Inner {
@@ -245,26 +261,6 @@ impl load_balancing::Channel for Weak<Inner> {
     fn update_state(&self, update: load_balancing::Update) {
         let u = update.unwrap();
         self.upgrade().unwrap().picker.update(u.picker);
-    }
-}
-
-#[async_trait]
-impl MessageService for Channel {
-    async fn call(&self, request: Request<Into<Message>>) -> Response<From<Message>> {
-        self.wake_if_idle().await;
-        self.wait_for_resolver_update().await;
-        // pre-pick tasks (e.g. interceptor, retry)
-        // start attempt
-        // pick subchannel
-        // perform attempt on transport
-        let mut i = self.inner.picker.iter();
-        loop {
-            if let Some(p) = i.next().await {
-                let sc = p(&request).unwrap();
-                let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
-                return sc.call(request).await;
-            }
-        }
     }
 }
 

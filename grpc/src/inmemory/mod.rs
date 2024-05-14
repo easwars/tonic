@@ -13,7 +13,7 @@ use crate::{
         transport,
     },
     server,
-    service::{Message, MessageService, Request, Response},
+    service::{Request, Response, Service},
 };
 use once_cell::sync::Lazy;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -55,8 +55,8 @@ impl Drop for Listener {
 }
 
 #[async_trait]
-impl MessageService for Arc<Listener> {
-    async fn call(&self, request: Request<Box<dyn Message>>) -> Response<Box<dyn Message>> {
+impl Service for Arc<Listener> {
+    async fn call(&self, request: Request) -> Response {
         // 1. unblock accept, giving it a func back to me
         // 2. return what that func had
         let (s, r) = oneshot::channel();
@@ -90,7 +90,7 @@ impl ClientTransport {
 }
 
 impl transport::Transport for ClientTransport {
-    fn connect(&self, address: String) -> Result<Box<dyn MessageService>, String> {
+    fn connect(&self, address: String) -> Result<Box<dyn Service>, String> {
         Ok(Box::new(
             LISTENERS
                 .lock()
