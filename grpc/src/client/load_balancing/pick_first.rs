@@ -1,4 +1,5 @@
 use std::{
+    error::Error,
     mem,
     sync::{Arc, Mutex},
 };
@@ -17,9 +18,13 @@ pub static POLICY_NAME: &str = "pick_first";
 struct Builder {}
 
 impl lb::Builder for Builder {
-    fn build(&self, channel: Box<dyn lb::Channel>, options: lb::TODO) -> Box<dyn lb::Policy> {
+    fn build(
+        &self,
+        channel: Arc<dyn lb::SubchannelPool>,
+        options: lb::TODO,
+    ) -> Box<dyn lb::Policy> {
         Box::new(Policy {
-            ch: Arc::new(channel),
+            ch: channel,
             sc: Arc::new(Mutex::new(None)),
         })
     }
@@ -35,14 +40,14 @@ pub fn reg() {
 
 #[derive(Clone)]
 struct Policy {
-    ch: Arc<Box<dyn lb::Channel>>,
+    ch: Arc<dyn lb::SubchannelPool>,
     sc: Arc<Mutex<Option<Arc<dyn Subchannel>>>>,
 }
 
 #[async_trait]
 impl lb::Policy for Policy {
-    async fn update(&self, update: lb::PolicyUpdate) {
-        if let name_resolution::ResolverUpdate::Data((u, tx)) = update.update {
+    async fn update(&self, update: lb::PolicyUpdate) -> Result<(), Box<dyn Error>> {
+        if let name_resolution::ResolverUpdate::Data(u) = update.update {
             if let Some(e) = u.endpoints.into_iter().next() {
                 if let Some(a) = e.addresses.into_iter().next() {
                     let a = Arc::new(a);
@@ -69,11 +74,12 @@ impl lb::Policy for Policy {
                         }
                     }));
                     sc.connect();
-                    let _ = tx.send(Ok(()));
-                    return;
+                    return Ok(());
                 }
+                return Err("no addresses".into());
             }
-            let _ = tx.send(Err("".into()));
+            return Err("no endpoints".into());
         }
+        Err("unhandled".into())
     }
 }

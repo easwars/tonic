@@ -64,7 +64,7 @@ pub trait Subchannel: Send + Sync {
 /// An LB policy factory
 pub trait Builder: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
-    fn build(&self, channel: Box<dyn Channel>, options: TODO) -> Box<dyn Policy>;
+    fn build(&self, channel: Arc<dyn SubchannelPool>, options: TODO) -> Box<dyn Policy>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
 }
@@ -91,13 +91,12 @@ pub struct PolicyUpdate {
 
 #[async_trait]
 pub trait Policy: Send + Sync {
-    async fn update(&self, update: PolicyUpdate);
+    async fn update(&self, update: PolicyUpdate) -> Result<(), Box<dyn Error>>;
 }
 
-/// This channel is a set of features the LB policy may use from the channel.
-pub trait Channel: Send + Sync {
+/// Creates and manages subchannels.
+pub trait SubchannelPool: Send + Sync {
     /// Creates a new subchannel in idle state.
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
-    /// Consumes an update from the LB Policy.
     fn update_state(&self, update: Update);
 }

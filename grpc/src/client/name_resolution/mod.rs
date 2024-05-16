@@ -5,7 +5,6 @@ use std::{
     fmt::Display,
     sync::{Arc, Mutex},
 };
-use tokio::sync::oneshot;
 use tonic::async_trait;
 use url::Url;
 
@@ -25,9 +24,15 @@ impl SharedResolverBuilder {
     }
 }
 
+#[async_trait]
 impl ResolverBuilder for SharedResolverBuilder {
-    fn build(&self, target: Url, options: ResolverOptions) -> Box<dyn Resolver> {
-        self.rb.build(target, options)
+    async fn build(
+        &self,
+        target: Url,
+        balancer: Arc<dyn Balancer>,
+        options: ResolverOptions,
+    ) -> Box<dyn Resolver> {
+        self.rb.build(target, balancer, options).await
     }
 
     fn scheme(&self) -> &'static str {
@@ -66,9 +71,15 @@ impl ResolverRegistry {
 pub static GLOBAL_REGISTRY: Lazy<ResolverRegistry> = Lazy::new(|| ResolverRegistry::new());
 
 /// A name resolver factory
+#[async_trait]
 pub trait ResolverBuilder: Send + Sync {
     /// Builds a name resolver instance, or returns an error.
-    fn build(&self, target: Url, options: ResolverOptions) -> Box<dyn Resolver>;
+    async fn build(
+        &self,
+        target: Url,
+        balancer: Arc<dyn Balancer>,
+        options: ResolverOptions,
+    ) -> Box<dyn Resolver>;
     /// Reports the URI scheme handled by this name resolver.
     fn scheme(&self) -> &'static str;
     /// Returns the default authority for a channel using this name resolver and
@@ -79,12 +90,16 @@ pub trait ResolverBuilder: Send + Sync {
     }
 }
 
-pub enum ResolverUpdate {
-    Err(Box<dyn Error + Send + Sync>), // The name resolver encountered an error.
-    Data((ResolverData, ResolverDataResponse)), // The name resolver produced a result.
+#[async_trait]
+pub trait Balancer: Send + Sync {
+    fn parse_config(&self); // TODO
+    async fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error>>;
 }
 
-pub type ResolverDataResponse = oneshot::Sender<Result<(), Box<dyn Error + Send + Sync>>>;
+pub enum ResolverUpdate {
+    Err(Box<dyn Error + Send + Sync>), // The name resolver encountered an error.
+    Data(ResolverData),                // The name resolver produced a result.
+}
 
 #[derive(Debug, Default)]
 #[non_exhaustive]
@@ -128,8 +143,6 @@ impl Display for Address {
 
 pub static TCP_IP_ADDRESS_TYPE: &str = "tcp";
 
-#[async_trait]
 pub trait Resolver: Send + Sync {
     fn resolve_now(&self);
-    async fn update(&self) -> ResolverUpdate;
 }
