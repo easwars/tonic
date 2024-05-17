@@ -29,11 +29,11 @@ pub struct Request {
 
 // TODO: needs a builder to keep setters off of the constructed type.
 impl Request {
-    pub fn new(method: String, parent: Option<&Request>) -> (Self, Sender<Box<dyn Message>>) {
+    pub fn new(method: &str, parent: Option<&Request>) -> (Self, Sender<Box<dyn Message>>) {
         let (tx, rx) = mpsc::channel(1);
         (
             Self {
-                method,
+                method: method.to_string(),
                 rx,
                 deadline: parent.and_then(|p| p.deadline),
             },

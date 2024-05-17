@@ -7,10 +7,12 @@ use std::{
 };
 
 use crate::{
-    attributes::Attributes,
     client::{
-        name_resolution::{self, Resolver, ResolverBuilder, SharedResolverBuilder},
-        transport,
+        name_resolution::{
+            Address, Endpoint, Resolver, ResolverBuilder, ResolverData, ResolverHandler,
+            ResolverOptions, ResolverUpdate, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY,
+        },
+        transport::{self, GLOBAL_TRANSPORT_REGISTRY},
     },
     server,
     service::{Request, Response, Service},
@@ -79,7 +81,7 @@ impl crate::server::Listener for Arc<Listener> {
 }
 
 static LISTENERS: Lazy<std::sync::Mutex<HashMap<String, Arc<Listener>>>> =
-    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+    Lazy::new(|| std::sync::Mutex::default());
 
 struct ClientTransport {}
 
@@ -105,11 +107,8 @@ impl transport::Transport for ClientTransport {
 static INMEMORY_ADDRESS_TYPE: &str = "inmemory";
 
 pub fn reg() {
-    dbg!("Registering inmemory::ClientTransport");
-    transport::GLOBAL_REGISTRY
-        .add_transport(INMEMORY_ADDRESS_TYPE.to_string(), ClientTransport::new());
-    name_resolution::GLOBAL_REGISTRY
-        .add_builder(SharedResolverBuilder::new(InMemoryResolverBuilder));
+    GLOBAL_TRANSPORT_REGISTRY.add_transport(INMEMORY_ADDRESS_TYPE, ClientTransport::new());
+    GLOBAL_RESOLVER_REGISTRY.add_builder(SharedResolverBuilder::new(InMemoryResolverBuilder));
 }
 
 struct InMemoryResolverBuilder;
@@ -119,25 +118,22 @@ impl ResolverBuilder for InMemoryResolverBuilder {
     async fn build(
         &self,
         target: url::Url,
-        balancer: Arc<dyn crate::client::name_resolution::Balancer>,
-        options: crate::client::name_resolution::ResolverOptions,
-    ) -> Box<dyn name_resolution::Resolver> {
+        balancer: Arc<dyn ResolverHandler>,
+        options: ResolverOptions,
+    ) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap();
         let _ = balancer
-            .update(name_resolution::ResolverUpdate::Data(
-                name_resolution::ResolverData {
-                    endpoints: vec![name_resolution::Endpoint {
-                        addresses: vec![name_resolution::Address {
-                            address_type: INMEMORY_ADDRESS_TYPE.to_string(),
-                            address: id.to_string(),
-                            attributes: Attributes::new(),
-                        }],
-                        attributes: Attributes::new(),
+            .update(ResolverUpdate::Data(ResolverData {
+                endpoints: vec![Endpoint {
+                    addresses: vec![Address {
+                        address_type: INMEMORY_ADDRESS_TYPE.to_string(),
+                        address: id.to_string(),
+                        ..Default::default()
                     }],
-                    service_config: String::from(""),
-                    attributes: Attributes::new(),
-                },
-            ))
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
             .await;
 
         Box::new(NopResolver {})

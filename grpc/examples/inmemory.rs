@@ -67,7 +67,7 @@ async fn main() {
     println!("Creating channel for {target}");
     let chan = grpc::client::Channel::new(target.as_str(), None, None, ChannelOptions::default());
 
-    let (req, tx) = Request::new("hi".to_string(), None);
+    let (req, tx) = Request::new("hi", None);
     let mut res = chan.call(req).await;
 
     let _ = tx

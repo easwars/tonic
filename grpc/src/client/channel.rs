@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::vec;
 
-use tokio::sync::watch;
+use tokio::sync::{watch, Mutex, Notify};
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
@@ -13,10 +13,17 @@ use crate::credentials::Credentials;
 use crate::rt;
 use crate::service::{Request, Response, Service};
 
-use super::load_balancing::{pick_first, PolicyUpdate};
-use super::name_resolution::ResolverBuilder;
+use super::load_balancing::{
+    pick_first, LbPolicy, LbPolicyOptions, LbPolicyRegistry, LbPolicyUpdate, LbUpdate, Picker,
+    GLOBAL_LB_REGISTRY,
+};
+use super::name_resolution::{
+    Address, ResolverBuilder, ResolverHandler, ResolverOptions, ResolverRegistry, ResolverUpdate,
+    GLOBAL_RESOLVER_REGISTRY,
+};
 use super::subchannel::Subchannel;
-use super::{load_balancing, name_resolution, transport};
+use super::transport::TransportRegistry;
+use super::{load_balancing, transport};
 
 #[non_exhaustive]
 pub struct ChannelOptions {
@@ -29,9 +36,9 @@ pub struct ChannelOptions {
     pub disable_health_checks: bool,
     pub max_retry_memory: u32, // ?
     pub idle_timeout: Duration,
-    pub transport_registry: Option<super::transport::Registry>,
-    pub name_resolver_registry: Option<super::load_balancing::Registry>,
-    pub lb_policy_registry: Option<super::name_resolution::ResolverRegistry>,
+    pub transport_registry: Option<TransportRegistry>,
+    pub name_resolver_registry: Option<LbPolicyRegistry>,
+    pub lb_policy_registry: Option<ResolverRegistry>,
 
     // Typically we allow settings at the channel level that impact all RPCs,
     // but can also be set per-RPC.  E.g.s:
@@ -94,17 +101,17 @@ pub struct Channel {
 
 struct PersistentChannel {
     target: Url,
-    active_channel: tokio::sync::Mutex<Option<Arc<ActiveChannel>>>,
+    active_channel: Mutex<Option<Arc<ActiveChannel>>>,
 }
 
 // A channel that is not idle (connecting, ready, or erroring).
 struct ActiveChannel {
-    cur_state: tokio::sync::Mutex<ConnectivityState>,
+    cur_state: Mutex<ConnectivityState>,
     lb: Arc<LbWrapper>,
 }
 
 struct SubchannelPool {
-    picker: Watcher<Box<load_balancing::Picker>>,
+    picker: Watcher<Box<dyn Picker>>,
 }
 
 impl SubchannelPool {
@@ -116,16 +123,13 @@ impl SubchannelPool {
 }
 
 impl load_balancing::SubchannelPool for SubchannelPool {
-    fn update_state(&self, update: load_balancing::Update) {
+    fn update_state(&self, update: LbUpdate) {
         if let Ok(s) = update {
             self.picker.update(s.picker);
         }
     }
-    fn new_subchannel(
-        &self,
-        address: Arc<name_resolution::Address>,
-    ) -> Arc<dyn load_balancing::Subchannel> {
-        let t = transport::GLOBAL_REGISTRY
+    fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn load_balancing::Subchannel> {
+        let t = transport::GLOBAL_TRANSPORT_REGISTRY
             .get_transport(&address.address_type)
             .unwrap();
         Arc::new(Subchannel::new(t, address.address.clone()))
@@ -133,28 +137,25 @@ impl load_balancing::SubchannelPool for SubchannelPool {
 }
 
 struct LbWrapper {
-    policy: tokio::sync::Mutex<Option<Arc<Box<dyn load_balancing::Policy>>>>,
+    policy: Mutex<Option<Arc<Box<dyn LbPolicy>>>>,
     subchannel_pool: Arc<SubchannelPool>,
+    first_update: Notify,
 }
 
 impl LbWrapper {
     fn new() -> Self {
         Self {
-            policy: tokio::sync::Mutex::default(),
+            policy: Mutex::default(),
             subchannel_pool: Arc::new(SubchannelPool::new()),
+            first_update: Notify::new(),
         }
     }
-}
-
-#[async_trait]
-impl name_resolution::Balancer for LbWrapper {
-    fn parse_config(&self) {}
-    async fn update(
-        self: &Self,
-        state: name_resolution::ResolverUpdate,
-    ) -> Result<(), Box<dyn Error>> {
+    async fn wait_for_resolver_update(&self) {
+        self.first_update.notified().await;
+    }
+    async fn handle_update(self: &Self, state: ResolverUpdate) -> Result<(), Box<dyn Error>> {
         let policy_name = pick_first::POLICY_NAME;
-        let name_resolution::ResolverUpdate::Data(update) = state else {
+        let ResolverUpdate::Data(update) = state else {
             todo!("unhandled update type");
         };
         if update.service_config != "" {
@@ -165,10 +166,10 @@ impl name_resolution::Balancer for LbWrapper {
         let mut p = self.policy.lock().await;
         match &*p {
             None => {
-                let newpol = load_balancing::GLOBAL_REGISTRY
+                let newpol = GLOBAL_LB_REGISTRY
                     .get_policy(policy_name)
                     .unwrap()
-                    .build(self.subchannel_pool.clone(), load_balancing::TODO);
+                    .build(self.subchannel_pool.clone(), LbPolicyOptions {});
                 *p = Some(Arc::new(newpol));
             }
             _ => { /* TODO */ }
@@ -176,12 +177,22 @@ impl name_resolution::Balancer for LbWrapper {
 
         p.clone()
             .unwrap()
-            .update(PolicyUpdate {
-                update: name_resolution::ResolverUpdate::Data(update),
+            .update(LbPolicyUpdate {
+                update: ResolverUpdate::Data(update),
                 config: super::load_balancing::TODO,
             })
             .await
         // TODO: close old LB policy gracefully vs. drop?
+    }
+}
+
+#[async_trait]
+impl ResolverHandler for LbWrapper {
+    fn parse_config(&self) {}
+    async fn update(self: &Self, state: ResolverUpdate) -> Result<(), Box<dyn Error>> {
+        let res = self.handle_update(state).await;
+        self.first_update.notify_one();
+        res
     }
 }
 
@@ -252,46 +263,47 @@ impl Channel {
         }
         s.clone().unwrap()
     }
-    async fn wait_for_resolver_update(&self) {
-        return; // TODO
-    }
 
     pub async fn call(&self, request: Request) -> Response {
         let ac = self.get_active_channel().await;
-        self.wait_for_resolver_update().await;
-        // pre-pick tasks (e.g. interceptor, retry)
-        // start attempt
-        // pick subchannel
-        // perform attempt on transport
-        let mut i = ac.lb.subchannel_pool.picker.iter();
-        loop {
-            if let Some(p) = i.next().await {
-                let sc = p(&request).unwrap();
-                let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
-                return sc.call(request).await;
-            }
-        }
+        ac.call(request).await
     }
 }
 
 impl ActiveChannel {
     async fn new(target: Url) -> Self {
         let new_ac = Self {
-            cur_state: tokio::sync::Mutex::new(ConnectivityState::Connecting),
+            cur_state: Mutex::new(ConnectivityState::Connecting),
             lb: Arc::new(LbWrapper::new()),
         };
 
-        let rb = name_resolution::GLOBAL_REGISTRY.get_scheme(target.scheme());
+        let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
         let resolver = rb
             .unwrap()
             .build(
                 target.clone(),
                 new_ac.lb.clone(),
-                name_resolution::ResolverOptions::default(),
+                ResolverOptions::default(),
             )
             .await;
         // TODO: save resolver in field.
         new_ac
+    }
+
+    async fn call(&self, request: Request) -> Response {
+        self.lb.wait_for_resolver_update().await;
+        // pre-pick tasks (e.g. deadlines, interceptors, retry)
+        // start attempt
+        // pick subchannel
+        // perform attempt on transport
+        let mut i = self.lb.subchannel_pool.picker.iter();
+        loop {
+            if let Some(p) = i.next().await {
+                let sc = p.pick(&request).unwrap();
+                let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
+                return sc.call(request).await;
+            }
+        }
     }
 }
 
@@ -306,7 +318,7 @@ impl PersistentChannel {
     ) -> Self {
         Self {
             target: Url::from_str(target).unwrap(), // TODO handle err
-            active_channel: tokio::sync::Mutex::default(),
+            active_channel: Mutex::default(),
         }
     }
 }

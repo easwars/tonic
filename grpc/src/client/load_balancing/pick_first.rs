@@ -6,26 +6,29 @@ use std::{
 
 use tonic::async_trait;
 
-use crate::client::{
-    load_balancing::{self as lb, State},
-    name_resolution, ConnectivityState,
+use crate::{
+    client::{load_balancing::State, name_resolution::ResolverUpdate, ConnectivityState},
+    service::Request,
 };
 
-use super::{Pick, Subchannel};
+use super::{
+    LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyUpdate, Pick, Picker, Subchannel,
+    SubchannelPool,
+};
 
 pub static POLICY_NAME: &str = "pick_first";
 
 struct Builder {}
 
-impl lb::Builder for Builder {
+impl LbPolicyBuilder for Builder {
     fn build(
         &self,
-        channel: Arc<dyn lb::SubchannelPool>,
-        options: lb::TODO,
-    ) -> Box<dyn lb::Policy> {
+        channel: Arc<dyn SubchannelPool>,
+        options: LbPolicyOptions,
+    ) -> Box<dyn LbPolicy> {
         Box::new(Policy {
             ch: channel,
-            sc: Arc::new(Mutex::new(None)),
+            sc: Arc::default(),
         })
     }
 
@@ -35,19 +38,19 @@ impl lb::Builder for Builder {
 }
 
 pub fn reg() {
-    super::GLOBAL_REGISTRY.add_builder(Builder {})
+    super::GLOBAL_LB_REGISTRY.add_builder(Builder {})
 }
 
 #[derive(Clone)]
 struct Policy {
-    ch: Arc<dyn lb::SubchannelPool>,
+    ch: Arc<dyn SubchannelPool>,
     sc: Arc<Mutex<Option<Arc<dyn Subchannel>>>>,
 }
 
 #[async_trait]
-impl lb::Policy for Policy {
-    async fn update(&self, update: lb::PolicyUpdate) -> Result<(), Box<dyn Error>> {
-        if let name_resolution::ResolverUpdate::Data(u) = update.update {
+impl LbPolicy for Policy {
+    async fn update(&self, update: LbPolicyUpdate) -> Result<(), Box<dyn Error>> {
+        if let ResolverUpdate::Data(u) = update.update {
             if let Some(e) = u.endpoints.into_iter().next() {
                 if let Some(a) = e.addresses.into_iter().next() {
                     let a = Arc::new(a);
@@ -63,13 +66,7 @@ impl lb::Policy for Policy {
                             let sc = sc2.clone();
                             slf.ch.update_state(Ok(Box::new(State {
                                 connectivity_state: s,
-                                picker: Box::new(move |_v| {
-                                    Ok(Pick {
-                                        subchannel: sc.clone(),
-                                        on_complete: None,
-                                        metadata: None,
-                                    })
-                                }),
+                                picker: Box::new(ScPicker { sc: sc }),
                             })));
                         }
                     }));
@@ -81,5 +78,19 @@ impl lb::Policy for Policy {
             return Err("no endpoints".into());
         }
         Err("unhandled".into())
+    }
+}
+
+struct ScPicker {
+    sc: Arc<dyn Subchannel>,
+}
+
+impl Picker for ScPicker {
+    fn pick(&self, request: &Request) -> Result<Pick, Box<dyn Error>> {
+        Ok(Pick {
+            subchannel: self.sc.clone(),
+            on_complete: None,
+            metadata: None,
+        })
     }
 }
