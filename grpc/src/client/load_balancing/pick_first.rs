@@ -66,7 +66,7 @@ impl LbPolicy for Policy {
                             let sc = sc2.clone();
                             slf.ch.update_state(Ok(Box::new(State {
                                 connectivity_state: s,
-                                picker: Box::new(ScPicker { sc: sc }),
+                                picker: Box::new(OneSubchannelPicker { sc: sc }),
                             })));
                         }
                     }));
@@ -81,11 +81,11 @@ impl LbPolicy for Policy {
     }
 }
 
-struct ScPicker {
+struct OneSubchannelPicker {
     sc: Arc<dyn Subchannel>,
 }
 
-impl Picker for ScPicker {
+impl Picker for OneSubchannelPicker {
     fn pick(&self, request: &Request) -> Result<Pick, Box<dyn Error>> {
         Ok(Pick {
             subchannel: self.sc.clone(),
