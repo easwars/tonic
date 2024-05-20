@@ -7,7 +7,7 @@ use std::{
 use tonic::async_trait;
 
 use crate::{
-    client::{load_balancing::State, name_resolution::ResolverUpdate, ConnectivityState},
+    client::{load_balancing::LbState, name_resolution::ResolverUpdate, ConnectivityState},
     service::Request,
 };
 
@@ -64,10 +64,10 @@ impl LbPolicy for Policy {
                     sc.listen(Box::new(move |s| {
                         if s == ConnectivityState::Ready {
                             let sc = sc2.clone();
-                            slf.ch.update_state(Ok(Box::new(State {
+                            slf.ch.update_state(LbState {
                                 connectivity_state: s,
                                 picker: Box::new(OneSubchannelPicker { sc: sc }),
-                            })));
+                            });
                         }
                     }));
                     sc.connect();

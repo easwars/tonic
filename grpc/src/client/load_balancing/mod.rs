@@ -32,10 +32,8 @@ pub trait Picker: Send + Sync {
     fn pick(&self, request: &Request) -> Result<Pick, Box<dyn Error>>;
 }
 
-pub type LbUpdate = Result<Box<State>, Box<dyn Error>>;
-
 /// Data provided by the LB policy.
-pub struct State {
+pub struct LbState {
     pub connectivity_state: super::ConnectivityState,
     pub picker: Box<dyn Picker>,
 }
@@ -60,7 +58,7 @@ pub trait LbPolicy: Send + Sync {
 pub trait SubchannelPool: Send + Sync {
     /// Creates a new subchannel in idle state.
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
-    fn update_state(&self, update: LbUpdate);
+    fn update_state(&self, update: LbState);
 }
 
 pub trait Subchannel: Send + Sync {

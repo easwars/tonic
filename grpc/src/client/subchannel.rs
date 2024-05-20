@@ -6,7 +6,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::AbortHandle;
 use tonic::async_trait;
 
-use super::load_balancing::{self, LbUpdate, Picker};
+use super::load_balancing::{self, Picker};
 use super::name_resolution::Address;
 use super::transport::{self, ConnectedTransport, Transport};
 use super::ConnectivityState;
@@ -16,7 +16,7 @@ struct TODO;
 
 struct Subchannel {
     t: Arc<dyn Transport>,
-    state: Mutex<State>,
+    state: Mutex<SubchannelState>,
     address: String,
     backoff: TODO,
     listeners: Mutex<Vec<Box<dyn Fn(ConnectivityState) + Send + Sync>>>,
@@ -24,14 +24,14 @@ struct Subchannel {
 
 type SharedService = Arc<dyn ConnectedTransport>;
 
-enum State {
+enum SubchannelState {
     Idle,
     Connecting(AbortHandle),
     Ready(SharedService),
     TransientFailure(Instant),
 }
 
-impl State {
+impl SubchannelState {
     fn connected_transport(&self) -> Option<SharedService> {
         match self {
             Self::Ready(t) => Some(t.clone()),
@@ -40,9 +40,9 @@ impl State {
     }
 }
 
-impl Drop for State {
+impl Drop for SubchannelState {
     fn drop(&mut self) {
-        if let State::Connecting(ah) = self {
+        if let SubchannelState::Connecting(ah) = self {
             ah.abort();
         }
     }
@@ -53,7 +53,7 @@ impl Subchannel {
     fn new(t: Arc<dyn Transport>, address: String) -> Self {
         Subchannel {
             t,
-            state: Mutex::new(State::Idle),
+            state: Mutex::new(SubchannelState::Idle),
             address,
             backoff: TODO,
             listeners: Mutex::default(),
@@ -69,7 +69,7 @@ impl Subchannel {
     fn connect(&self, now: bool) {
         let mut state = self.state.lock().unwrap();
         match &*state {
-            State::Idle => {
+            SubchannelState::Idle => {
                 let n = Arc::new(Notify::new());
                 let n2 = n.clone();
                 // TODO: safe alternative? This task is aborted in drop so self
@@ -89,34 +89,38 @@ impl Subchannel {
                     s.to_idle();
                 };
                 let jh = tokio::task::spawn(fut);
-                *state = State::Connecting(jh.abort_handle());
+                *state = SubchannelState::Connecting(jh.abort_handle());
                 n.notify_one();
             }
-            State::TransientFailure(_) => {
+            SubchannelState::TransientFailure(_) => {
                 // TODO: remember connect request and skip Idle when expires
             }
-            State::Ready(_) => {}      // Cannot connect while ready.
-            State::Connecting(_) => {} // Already connecting.
+            SubchannelState::Ready(_) => {} // Cannot connect while ready.
+            SubchannelState::Connecting(_) => {} // Already connecting.
         }
     }
 
     fn to_ready(&self, svc: Arc<dyn ConnectedTransport>) {
-        *self.state.lock().unwrap() = State::Ready(svc);
+        *self.state.lock().unwrap() = SubchannelState::Ready(svc);
         self.notify_listeners();
     }
 
     fn to_idle(&self) {
-        *self.state.lock().unwrap() = State::Idle;
+        *self.state.lock().unwrap() = SubchannelState::Idle;
         self.notify_listeners();
     }
 
+    fn connectivity_state(&self) -> ConnectivityState {
+        match *self.state.lock().unwrap() {
+            SubchannelState::Idle => ConnectivityState::Idle,
+            SubchannelState::Connecting(_) => ConnectivityState::Connecting,
+            SubchannelState::Ready(_) => ConnectivityState::Ready,
+            SubchannelState::TransientFailure(_) => ConnectivityState::TransientFailure,
+        }
+    }
+
     fn notify_listeners(&self) {
-        let state = match *self.state.lock().unwrap() {
-            State::Idle => ConnectivityState::Idle,
-            State::Connecting(_) => ConnectivityState::Connecting,
-            State::Ready(_) => ConnectivityState::Ready,
-            State::TransientFailure(_) => ConnectivityState::TransientFailure,
-        };
+        let state = self.connectivity_state();
         let listeners = self.listeners.lock().unwrap();
         for lis in &*listeners {
             lis(state);
@@ -140,7 +144,7 @@ impl load_balancing::Subchannel for Subchannel {
 
     fn shutdown(&self) {
         // Transition to idle.
-        *self.state.lock().unwrap() = State::Idle;
+        *self.state.lock().unwrap() = SubchannelState::Idle;
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -176,8 +180,14 @@ impl SubchannelPool {
         let mut i = self.picker.iter();
         loop {
             if let Some(p) = i.next().await {
-                let sc = p.pick(&request).unwrap();
-                let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
+                let sc = p
+                    .pick(&request)
+                    .expect("TODO: handle picker errors (queue or fail RPC)");
+                let sc = sc
+                    .subchannel
+                    .as_any()
+                    .downcast_ref::<Subchannel>()
+                    .expect("Illegal Subchannel in pick");
                 return sc.call(request).await;
             }
         }
@@ -185,10 +195,8 @@ impl SubchannelPool {
 }
 
 impl load_balancing::SubchannelPool for SubchannelPool {
-    fn update_state(&self, update: LbUpdate) {
-        if let Ok(s) = update {
-            self.picker.update(s.picker);
-        }
+    fn update_state(&self, update: load_balancing::LbState) {
+        self.picker.update(update.picker);
     }
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn load_balancing::Subchannel> {
         let t = transport::GLOBAL_TRANSPORT_REGISTRY
