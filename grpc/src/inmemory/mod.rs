@@ -12,19 +12,21 @@ use crate::{
             Address, Endpoint, Resolver, ResolverBuilder, ResolverData, ResolverHandler,
             ResolverOptions, ResolverUpdate, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY,
         },
-        transport::{self, GLOBAL_TRANSPORT_REGISTRY},
+        transport::{self, ConnectedTransport, GLOBAL_TRANSPORT_REGISTRY},
     },
     server,
     service::{Request, Response, Service},
 };
 use once_cell::sync::Lazy;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tonic::async_trait;
 
 pub struct Listener {
     id: String,
     s: Box<mpsc::Sender<Option<server::Call>>>,
     r: Arc<Mutex<mpsc::Receiver<Option<server::Call>>>>,
+    // List of notifiers to call when closed.
+    closed: Notify,
 }
 
 static ID: AtomicU32 = AtomicU32::new(0);
@@ -36,6 +38,7 @@ impl Listener {
             id: format!("{}", ID.fetch_add(1, Ordering::Relaxed)),
             s: Box::new(tx),
             r: Arc::new(Mutex::new(rx)),
+            closed: Notify::new(),
         });
         LISTENERS.lock().unwrap().insert(s.id.clone(), s.clone());
         s
@@ -52,6 +55,7 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
+        self.closed.notify_waiters();
         LISTENERS.lock().unwrap().remove(&self.id);
     }
 }
@@ -64,6 +68,13 @@ impl Service for Arc<Listener> {
         let (s, r) = oneshot::channel();
         self.s.send(Some((request, s))).await.unwrap();
         r.await.unwrap()
+    }
+}
+
+#[async_trait]
+impl ConnectedTransport for Arc<Listener> {
+    async fn disconnected(&self) {
+        self.closed.notified().await;
     }
 }
 
@@ -91,16 +102,16 @@ impl ClientTransport {
     }
 }
 
+#[async_trait]
 impl transport::Transport for ClientTransport {
-    fn connect(&self, address: String) -> Result<Box<dyn Service>, String> {
-        Ok(Box::new(
-            LISTENERS
-                .lock()
-                .unwrap()
-                .get(&address)
-                .ok_or(format!("Could not find listener for address {address}"))?
-                .clone(),
-        ))
+    async fn connect(&self, address: String) -> Result<Box<dyn ConnectedTransport>, String> {
+        let lis = LISTENERS
+            .lock()
+            .unwrap()
+            .get(&address)
+            .ok_or(format!("Could not find listener for address {address}"))?
+            .clone();
+        Ok(Box::new(lis))
     }
 }
 

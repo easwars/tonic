@@ -4,26 +4,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::vec;
 
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{Mutex, Notify};
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
 use crate::attributes::Attributes;
 use crate::credentials::Credentials;
 use crate::rt;
-use crate::service::{Request, Response, Service};
+use crate::service::{Request, Response};
 
 use super::load_balancing::{
-    pick_first, LbPolicy, LbPolicyOptions, LbPolicyRegistry, LbPolicyUpdate, LbUpdate, Picker,
-    GLOBAL_LB_REGISTRY,
+    pick_first, LbPolicy, LbPolicyOptions, LbPolicyRegistry, LbPolicyUpdate, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
-    Address, ResolverBuilder, ResolverHandler, ResolverOptions, ResolverRegistry, ResolverUpdate,
+    ResolverBuilder, ResolverHandler, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
-use super::subchannel::Subchannel;
+use super::subchannel::SubchannelPool;
 use super::transport::TransportRegistry;
-use super::{load_balancing, transport};
 
 #[non_exhaustive]
 pub struct ChannelOptions {
@@ -108,32 +106,6 @@ struct PersistentChannel {
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     lb: Arc<LbWrapper>,
-}
-
-struct SubchannelPool {
-    picker: Watcher<Box<dyn Picker>>,
-}
-
-impl SubchannelPool {
-    fn new() -> Self {
-        Self {
-            picker: Watcher::new(),
-        }
-    }
-}
-
-impl load_balancing::SubchannelPool for SubchannelPool {
-    fn update_state(&self, update: LbUpdate) {
-        if let Ok(s) = update {
-            self.picker.update(s.picker);
-        }
-    }
-    fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn load_balancing::Subchannel> {
-        let t = transport::GLOBAL_TRANSPORT_REGISTRY
-            .get_transport(&address.address_type)
-            .unwrap();
-        Arc::new(Subchannel::new(t, address.address.clone()))
-    }
 }
 
 struct LbWrapper {
@@ -296,14 +268,7 @@ impl ActiveChannel {
         // start attempt
         // pick subchannel
         // perform attempt on transport
-        let mut i = self.lb.subchannel_pool.picker.iter();
-        loop {
-            if let Some(p) = i.next().await {
-                let sc = p.pick(&request).unwrap();
-                let sc = sc.subchannel.as_any().downcast_ref::<Subchannel>().unwrap();
-                return sc.call(request).await;
-            }
-        }
+        self.lb.subchannel_pool.call(request).await
     }
 }
 
@@ -319,48 +284,6 @@ impl PersistentChannel {
         Self {
             target: Url::from_str(target).unwrap(), // TODO handle err
             active_channel: Mutex::default(),
-        }
-    }
-}
-
-// Enables multiple receivers to view data output from a single producer.
-// Producer calls update.  Consumers call iter() and call next() until they find
-// a good value or encounter None.
-struct Watcher<T> {
-    tx: watch::Sender<Option<Arc<T>>>,
-    rx: watch::Receiver<Option<Arc<T>>>,
-}
-
-struct WatcherIter<T> {
-    rx: watch::Receiver<Option<Arc<T>>>,
-}
-
-impl<T> Watcher<T> {
-    fn new() -> Self {
-        let (tx, rx) = watch::channel(None);
-        Self { tx, rx }
-    }
-
-    fn iter(&self) -> WatcherIter<T> {
-        let mut rx = self.rx.clone();
-        rx.mark_changed();
-        WatcherIter { rx }
-    }
-
-    fn update(&self, item: T) {
-        self.tx.send(Some(Arc::new(item))).unwrap();
-    }
-}
-
-impl<T> WatcherIter<T> {
-    // next returns None when the Watcher is dropped.
-    async fn next(&mut self) -> Option<Arc<T>> {
-        loop {
-            self.rx.changed().await.ok()?;
-            let x = self.rx.borrow_and_update();
-            if x.is_some() {
-                return x.clone();
-            }
         }
     }
 }

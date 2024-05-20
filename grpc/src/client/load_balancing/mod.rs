@@ -21,7 +21,7 @@ pub trait LbPolicyBuilder: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
     fn build(
         &self,
-        channel: Arc<dyn SubchannelPool>,
+        subchannel_pool: Arc<dyn SubchannelPool>,
         options: LbPolicyOptions,
     ) -> Box<dyn LbPolicy>;
     /// Reports the name of the LB Policy.
