@@ -167,6 +167,7 @@ impl Service for Subchannel {
 
 pub(crate) struct SubchannelPool {
     picker: Watcher<Box<dyn Picker>>,
+    pub(crate) connectivity_state: Watcher<ConnectivityState>,
     // TODO: HashSet<Subchannel>
 }
 
@@ -174,6 +175,7 @@ impl SubchannelPool {
     pub(crate) fn new() -> Self {
         Self {
             picker: Watcher::new(),
+            connectivity_state: Watcher::new(),
         }
     }
     pub(crate) async fn call(&self, request: Request) -> Response {
@@ -195,8 +197,9 @@ impl SubchannelPool {
 }
 
 impl load_balancing::SubchannelPool for SubchannelPool {
-    fn update_state(&self, update: load_balancing::LbState) {
+    fn update(&self, update: load_balancing::LbState) {
         self.picker.update(update.picker);
+        self.connectivity_state.update(update.connectivity_state);
     }
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn load_balancing::Subchannel> {
         let t = transport::GLOBAL_TRANSPORT_REGISTRY
@@ -209,7 +212,7 @@ impl load_balancing::SubchannelPool for SubchannelPool {
 // Enables multiple receivers to view data output from a single producer.
 // Producer calls update.  Consumers call iter() and call next() until they find
 // a good value or encounter None.
-struct Watcher<T> {
+pub(crate) struct Watcher<T> {
     tx: watch::Sender<Option<Arc<T>>>,
     rx: watch::Receiver<Option<Arc<T>>>,
 }
@@ -220,10 +223,17 @@ impl<T> Watcher<T> {
         Self { tx, rx }
     }
 
-    fn iter(&self) -> WatcherIter<T> {
+    pub(crate) fn iter(&self) -> WatcherIter<T> {
         let mut rx = self.rx.clone();
         rx.mark_changed();
         WatcherIter { rx }
+    }
+
+    pub(crate) fn cur(&self) -> Option<Arc<T>> {
+        let mut rx = self.rx.clone();
+        rx.mark_changed();
+        let c = rx.borrow();
+        c.clone()
     }
 
     fn update(&self, item: T) {
@@ -231,13 +241,13 @@ impl<T> Watcher<T> {
     }
 }
 
-struct WatcherIter<T> {
+pub(crate) struct WatcherIter<T> {
     rx: watch::Receiver<Option<Arc<T>>>,
 }
 
 impl<T> WatcherIter<T> {
     // next returns None when the Watcher is dropped.
-    async fn next(&mut self) -> Option<Arc<T>> {
+    pub(crate) async fn next(&mut self) -> Option<Arc<T>> {
         loop {
             self.rx.changed().await.ok()?;
             let x = self.rx.borrow_and_update();

@@ -1,5 +1,5 @@
 use std::{any::Any, error::Error, sync::Arc};
-use tonic::{async_trait, metadata::MetadataMap};
+use tonic::metadata::MetadataMap;
 
 use crate::service::{Request, Response};
 
@@ -26,6 +26,9 @@ pub trait LbPolicyBuilder: Send + Sync {
     ) -> Box<dyn LbPolicy>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
+    fn parse_config(&self, config: &str) -> Option<Box<dyn LbConfig>> {
+        None
+    }
 }
 
 pub trait Picker: Send + Sync {
@@ -44,21 +47,23 @@ pub struct Pick {
     pub metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
 }
 
-pub struct LbPolicyUpdate {
-    pub update: ResolverUpdate,
-    pub config: TODO, // LB policy's parsed config
+pub trait LbPolicy: Send + Sync {
+    fn update(
+        &self,
+        update: ResolverUpdate,
+        config: Option<Box<dyn LbConfig>>,
+    ) -> Result<(), Box<dyn Error>>;
 }
 
-#[async_trait]
-pub trait LbPolicy: Send + Sync {
-    async fn update(&self, update: LbPolicyUpdate) -> Result<(), Box<dyn Error>>;
+pub trait LbConfig: Send {
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
 /// Creates and manages subchannels.
 pub trait SubchannelPool: Send + Sync {
     /// Creates a new subchannel in idle state.
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
-    fn update_state(&self, update: LbState);
+    fn update(&self, update: LbState);
 }
 
 pub trait Subchannel: Send + Sync {

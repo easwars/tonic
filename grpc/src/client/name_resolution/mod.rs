@@ -5,7 +5,6 @@ use std::{
     fmt::{Display, Formatter},
     sync::Arc,
 };
-use tonic::async_trait;
 use url::Url;
 
 use crate::attributes::Attributes;
@@ -13,33 +12,33 @@ use crate::attributes::Attributes;
 mod registry;
 pub use registry::{ResolverRegistry, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY};
 
+use super::service_config::ParsedServiceConfig;
+
 #[derive(Debug, PartialEq)]
 pub struct TODO;
 
 /// A name resolver factory
-#[async_trait]
 pub trait ResolverBuilder: Send + Sync {
     /// Builds a name resolver instance, or returns an error.
-    async fn build(
+    fn build(
         &self,
         target: Url,
-        handler: Arc<dyn ResolverHandler>,
+        balancer: Arc<dyn LoadBalancer>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver>;
     /// Reports the URI scheme handled by this name resolver.
     fn scheme(&self) -> &'static str;
     /// Returns the default authority for a channel using this name resolver and
     /// target.
-    fn authority(&self, target: &Url) -> String {
+    fn default_authority(&self, target: &Url) -> String {
         let path = target.path();
         path.strip_prefix("/").unwrap_or(path).to_string()
     }
 }
 
-#[async_trait]
-pub trait ResolverHandler: Send + Sync {
-    fn parse_config(&self); // TODO
-    async fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error>>;
+pub trait LoadBalancer: Send + Sync {
+    fn parse_config(&self, config: &str) -> Result<ParsedServiceConfig, Box<dyn Error>>; // TODO
+    fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error>>;
 }
 
 pub enum ResolverUpdate {
@@ -58,7 +57,7 @@ pub struct ResolverOptions {
 #[non_exhaustive]
 pub struct ResolverData {
     pub endpoints: Vec<Endpoint>,
-    pub service_config: String,
+    pub service_config: Option<ParsedServiceConfig>,
     // Contains optional data which can be used by the LB Policy or channel.
     pub attributes: Attributes,
 }

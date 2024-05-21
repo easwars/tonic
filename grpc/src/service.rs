@@ -13,8 +13,7 @@ pub struct Trailers {}
 // just have different extensions available? E.g. peer would be an extension
 // added to the request on the server but the client wouldn't see it.  The
 // stream/messages are different: the client can write request messages where
-// the server can only read them, and vice-versa.  That can be handled by a
-// builder.
+// the server can only read them, and vice-versa.
 
 #[derive(Debug)]
 pub struct Request {

@@ -4,16 +4,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use tonic::async_trait;
-
 use crate::{
     client::{load_balancing::LbState, name_resolution::ResolverUpdate, ConnectivityState},
     service::Request,
 };
 
 use super::{
-    LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyUpdate, Pick, Picker, Subchannel,
-    SubchannelPool,
+    LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, Picker, Subchannel, SubchannelPool,
 };
 
 pub static POLICY_NAME: &str = "pick_first";
@@ -47,10 +44,13 @@ struct Policy {
     sc: Arc<Mutex<Option<Arc<dyn Subchannel>>>>,
 }
 
-#[async_trait]
 impl LbPolicy for Policy {
-    async fn update(&self, update: LbPolicyUpdate) -> Result<(), Box<dyn Error>> {
-        if let ResolverUpdate::Data(u) = update.update {
+    fn update(
+        &self,
+        update: ResolverUpdate,
+        config: Option<Box<dyn LbConfig>>,
+    ) -> Result<(), Box<dyn Error>> {
+        if let ResolverUpdate::Data(u) = update {
             if let Some(e) = u.endpoints.into_iter().next() {
                 if let Some(a) = e.addresses.into_iter().next() {
                     let a = Arc::new(a);
@@ -64,13 +64,14 @@ impl LbPolicy for Policy {
                     sc.listen(Box::new(move |s| {
                         if s == ConnectivityState::Ready {
                             let sc = sc2.clone();
-                            slf.ch.update_state(LbState {
+                            slf.ch.update(LbState {
                                 connectivity_state: s,
-                                picker: Box::new(OneSubchannelPicker { sc: sc }),
+                                picker: Box::new(OneSubchannelPicker { sc }),
                             });
                         }
                     }));
                     sc.connect();
+                    // TODO: return a picker that queues RPCs.
                     return Ok(());
                 }
                 return Err("no addresses".into());

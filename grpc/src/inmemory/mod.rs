@@ -9,7 +9,7 @@ use std::{
 use crate::{
     client::{
         name_resolution::{
-            Address, Endpoint, Resolver, ResolverBuilder, ResolverData, ResolverHandler,
+            Address, Endpoint, LoadBalancer, Resolver, ResolverBuilder, ResolverData,
             ResolverOptions, ResolverUpdate, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY,
         },
         transport::{self, ConnectedTransport, GLOBAL_TRANSPORT_REGISTRY},
@@ -124,28 +124,25 @@ pub fn reg() {
 
 struct InMemoryResolverBuilder;
 
-#[async_trait]
 impl ResolverBuilder for InMemoryResolverBuilder {
-    async fn build(
+    fn build(
         &self,
         target: url::Url,
-        balancer: Arc<dyn ResolverHandler>,
+        balancer: Arc<dyn LoadBalancer>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap();
-        let _ = balancer
-            .update(ResolverUpdate::Data(ResolverData {
-                endpoints: vec![Endpoint {
-                    addresses: vec![Address {
-                        address_type: INMEMORY_ADDRESS_TYPE.to_string(),
-                        address: id.to_string(),
-                        ..Default::default()
-                    }],
+        let _ = balancer.update(ResolverUpdate::Data(ResolverData {
+            endpoints: vec![Endpoint {
+                addresses: vec![Address {
+                    address_type: INMEMORY_ADDRESS_TYPE.to_string(),
+                    address: id.to_string(),
                     ..Default::default()
                 }],
                 ..Default::default()
-            }))
-            .await;
+            }],
+            ..Default::default()
+        }));
 
         Box::new(NopResolver {})
     }

@@ -4,10 +4,9 @@ use std::{
 };
 
 use once_cell::sync::Lazy;
-use tonic::async_trait;
 use url::Url;
 
-use super::{Resolver, ResolverBuilder, ResolverHandler, ResolverOptions};
+use super::{LoadBalancer, Resolver, ResolverBuilder, ResolverOptions};
 
 #[derive(Clone)]
 pub struct SharedResolverBuilder {
@@ -20,15 +19,14 @@ impl SharedResolverBuilder {
     }
 }
 
-#[async_trait]
 impl ResolverBuilder for SharedResolverBuilder {
-    async fn build(
+    fn build(
         &self,
         target: Url,
-        handler: Arc<dyn ResolverHandler>,
+        handler: Arc<dyn LoadBalancer>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver> {
-        self.rb.build(target, handler, options).await
+        self.rb.build(target, handler, options)
     }
 
     fn scheme(&self) -> &'static str {
