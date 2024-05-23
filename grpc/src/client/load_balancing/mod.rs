@@ -64,6 +64,7 @@ pub trait SubchannelPool: Send + Sync {
     /// Creates a new subchannel in idle state.
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn Subchannel>;
     fn update(&self, update: LbState);
+    fn request_resolution(&self);
 }
 
 pub trait Subchannel: Send + Sync {

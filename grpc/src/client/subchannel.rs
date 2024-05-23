@@ -201,11 +201,16 @@ impl load_balancing::SubchannelPool for SubchannelPool {
         self.picker.update(update.picker);
         self.connectivity_state.update(update.connectivity_state);
     }
+
     fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn load_balancing::Subchannel> {
         let t = transport::GLOBAL_TRANSPORT_REGISTRY
             .get_transport(&address.address_type)
             .unwrap();
         Arc::new(Subchannel::new(t, address.address.clone()))
+    }
+
+    fn request_resolution(&self) {
+        todo!()
     }
 }
 
@@ -244,6 +249,9 @@ impl<T> Watcher<T> {
 pub(crate) struct WatcherIter<T> {
     rx: watch::Receiver<Option<Arc<T>>>,
 }
+// TODO: Use an arc_swap::ArcSwap instead that contains T and a channel closed
+// when T is updated.  Even if the channel needs a lock, the fast path becomes
+// lock-free.
 
 impl<T> WatcherIter<T> {
     // next returns None when the Watcher is dropped.

@@ -17,7 +17,7 @@ use super::load_balancing::{
     pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
-    self, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
+    self, Resolver, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
 use super::service_config::ParsedServiceConfig;
@@ -104,11 +104,6 @@ struct PersistentChannel {
 }
 
 // A channel that is not idle (connecting, ready, or erroring).
-struct ActiveChannel {
-    cur_state: Mutex<ConnectivityState>,
-    lb: Arc<LoadBalancer>,
-}
-
 struct LoadBalancer {
     policy: std::sync::Mutex<Option<Arc<Box<dyn LbPolicy>>>>,
     policy_builder: std::sync::Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
@@ -247,21 +242,24 @@ impl Channel {
     }
 }
 
+struct ActiveChannel {
+    cur_state: Mutex<ConnectivityState>,
+    lb: Arc<LoadBalancer>,
+    resolver: Box<dyn Resolver>,
+}
+
 impl ActiveChannel {
     fn new(target: Url) -> Self {
-        let new_ac = Self {
-            cur_state: Mutex::new(ConnectivityState::Connecting),
-            lb: Arc::new(LoadBalancer::new()),
-        };
-
+        let lb = Arc::new(LoadBalancer::new());
         let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
-        let resolver = rb.unwrap().build(
-            target.clone(),
-            new_ac.lb.clone(),
-            ResolverOptions::default(),
-        );
-        // TODO: save resolver in field.
-        new_ac
+        let resolver = rb
+            .unwrap()
+            .build(target.clone(), lb.clone(), ResolverOptions::default());
+        Self {
+            cur_state: Mutex::new(ConnectivityState::Connecting),
+            lb,
+            resolver,
+        }
     }
 
     async fn call(&self, request: Request) -> Response {
