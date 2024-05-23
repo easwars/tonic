@@ -72,6 +72,7 @@ impl LbPolicy for Policy {
                     }));
                     sc.connect();
                     // TODO: return a picker that queues RPCs.
+                    self.ch.request_resolution();
                     return Ok(());
                 }
                 return Err("no addresses".into());

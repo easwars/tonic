@@ -168,14 +168,16 @@ impl Service for Subchannel {
 pub(crate) struct SubchannelPool {
     picker: Watcher<Box<dyn Picker>>,
     pub(crate) connectivity_state: Watcher<ConnectivityState>,
+    request_resolution: Arc<Notify>,
     // TODO: HashSet<Subchannel>
 }
 
 impl SubchannelPool {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(request_resolution: Arc<Notify>) -> Self {
         Self {
             picker: Watcher::new(),
             connectivity_state: Watcher::new(),
+            request_resolution,
         }
     }
     pub(crate) async fn call(&self, request: Request) -> Response {
@@ -210,7 +212,7 @@ impl load_balancing::SubchannelPool for SubchannelPool {
     }
 
     fn request_resolution(&self) {
-        todo!()
+        self.request_resolution.notify_one();
     }
 }
 

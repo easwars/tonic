@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use std::vec;
 
 use tokio::sync::{Mutex, Notify};
+use tokio::task::AbortHandle;
 use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
@@ -17,7 +18,7 @@ use super::load_balancing::{
     pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
-    self, Resolver, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
+    self, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
 use super::service_config::ParsedServiceConfig;
@@ -112,11 +113,11 @@ struct LoadBalancer {
 }
 
 impl LoadBalancer {
-    fn new() -> Self {
+    fn new(request_resolution: Arc<Notify>) -> Self {
         Self {
             policy: std::sync::Mutex::default(),
             policy_builder: std::sync::Mutex::default(),
-            subchannel_pool: Arc::new(SubchannelPool::new()),
+            subchannel_pool: Arc::new(SubchannelPool::new(request_resolution)),
             first_update: Notify::new(),
         }
     }
@@ -245,20 +246,27 @@ impl Channel {
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     lb: Arc<LoadBalancer>,
-    resolver: Box<dyn Resolver>,
+    abort_handle: AbortHandle,
 }
 
 impl ActiveChannel {
     fn new(target: Url) -> Self {
-        let lb = Arc::new(LoadBalancer::new());
+        let notify = Arc::new(Notify::new());
+        let lb = Arc::new(LoadBalancer::new(notify.clone()));
         let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
         let resolver = rb
             .unwrap()
             .build(target.clone(), lb.clone(), ResolverOptions::default());
+        let jh = tokio::task::spawn(async move {
+            loop {
+                notify.notified().await;
+                resolver.resolve_now();
+            }
+        });
         Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
             lb,
-            resolver,
+            abort_handle: jh.abort_handle(),
         }
     }
 
@@ -269,6 +277,12 @@ impl ActiveChannel {
         // pick subchannel
         // perform attempt on transport
         self.lb.subchannel_pool.call(request).await
+    }
+}
+
+impl Drop for ActiveChannel {
+    fn drop(&mut self) {
+        self.abort_handle.abort();
     }
 }
 
