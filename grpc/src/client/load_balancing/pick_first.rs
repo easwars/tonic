@@ -49,7 +49,7 @@ impl LbPolicy for Policy {
         &self,
         update: ResolverUpdate,
         config: Option<Box<dyn LbConfig>>,
-    ) -> Result<(), Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if let ResolverUpdate::Data(u) = update {
             if let Some(e) = u.endpoints.into_iter().next() {
                 if let Some(a) = e.addresses.into_iter().next() {

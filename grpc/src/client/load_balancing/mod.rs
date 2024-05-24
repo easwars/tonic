@@ -52,7 +52,7 @@ pub trait LbPolicy: Send + Sync {
         &self,
         update: ResolverUpdate,
         config: Option<Box<dyn LbConfig>>,
-    ) -> Result<(), Box<dyn Error>>;
+    ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
 pub trait LbConfig: Send {

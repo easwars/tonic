@@ -23,7 +23,7 @@ impl ResolverBuilder for SharedResolverBuilder {
     fn build(
         &self,
         target: Url,
-        handler: Arc<dyn LoadBalancer>,
+        handler: Box<dyn LoadBalancer>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver> {
         self.rb.build(target, handler, options)

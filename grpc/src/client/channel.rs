@@ -4,9 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::vec;
 
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
 use tokio::task::AbortHandle;
-use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
 use crate::attributes::Attributes;
@@ -99,9 +98,151 @@ pub struct Channel {
     inner: Arc<PersistentChannel>,
 }
 
+impl Channel {
+    pub fn new(
+        target: &str,
+        credentials: Option<Box<dyn Credentials>>,
+        runtime: Option<Box<dyn rt::Runtime>>,
+        options: ChannelOptions,
+    ) -> Self {
+        Self {
+            inner: Arc::new(PersistentChannel::new(
+                target,
+                credentials,
+                runtime,
+                options,
+            )),
+        }
+    }
+    // Waits until all outstanding RPCs are completed, then stops the client
+    // (via "drop"?).  Note that there probably needs to be a way to add a
+    // timeout here or for the application to do a hard failure while waiting.
+    // Or maybe this feature isn't necessary - Go doesn't have it.  Users can
+    // determine on their own if they have outstanding calls.  Some users have
+    // requested this feature for Go, nonetheless.
+    pub async fn graceful_stop(self) {}
+
+    // Causes the channel to enter idle mode immediately.  Any pending RPCs
+    // will continue on existing connections.
+    // TODO: do we want this?  Go does not have this.
+    //pub async fn enter_idle(&self) {}
+
+    /// Returns the current state of the channel.
+    pub fn state(&mut self, connect: bool) -> ConnectivityState {
+        let ac = if !connect {
+            // If !connect and we have no active channel already, return idle.
+            let ac = self.inner.active_channel.lock().unwrap();
+            if ac.is_none() {
+                return ConnectivityState::Idle;
+            }
+            ac.as_ref().unwrap().clone()
+        } else {
+            // Otherwise, get or create the active channel.
+            self.get_active_channel()
+        };
+        if let Some(s) = ac.lb.subchannel_pool.connectivity_state.cur() {
+            return *s;
+        }
+        ConnectivityState::Idle
+    }
+
+    /// Waits for the state of the channel to change from source.  Times out and
+    /// returns an error after the deadline.
+    // TODO: do we want this or another API based on streaming?  Probably
+    // something like the Watcher<T> would be nice.
+    pub async fn wait_for_state_change(
+        &self,
+        source: ConnectivityState,
+        deadline: Instant,
+    ) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    fn get_active_channel(&self) -> Arc<ActiveChannel> {
+        let mut s = self.inner.active_channel.lock().unwrap();
+        if s.is_none() {
+            *s = Some(Arc::new(ActiveChannel::new(self.inner.target.clone())));
+        }
+        s.clone().unwrap()
+    }
+
+    pub async fn call(&self, request: Request) -> Response {
+        let ac = self.get_active_channel();
+        ac.call(request).await
+    }
+}
+
 struct PersistentChannel {
     target: Url,
     active_channel: std::sync::Mutex<Option<Arc<ActiveChannel>>>,
+}
+
+impl PersistentChannel {
+    // Channels begin idle so new is a simple constructor.  Required parameters
+    // are not in ChannelOptions.
+    fn new(
+        target: &str,
+        credentials: Option<Box<dyn Credentials>>,
+        runtime: Option<Box<dyn rt::Runtime>>,
+        options: ChannelOptions,
+    ) -> Self {
+        Self {
+            target: Url::from_str(target).unwrap(), // TODO handle err
+            active_channel: std::sync::Mutex::default(),
+        }
+    }
+}
+
+struct ActiveChannel {
+    cur_state: Mutex<ConnectivityState>,
+    //resolver_handler: ResolverHandler,
+    lb: Arc<LoadBalancer>,
+    abort_handle: AbortHandle,
+}
+
+impl ActiveChannel {
+    fn new(target: Url) -> Self {
+        let notify = Arc::new(Notify::new());
+        let lb = Arc::new(LoadBalancer::new(notify.clone()));
+        let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
+
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let unblock = Box::new(move || {
+            let _ = tx.send(());
+        });
+
+        let rh = Box::new(LoadBalancerWrapper::new(lb.clone(), unblock));
+        let resolver = rb
+            .unwrap()
+            .build(target.clone(), rh, ResolverOptions::default());
+        let jh = tokio::task::spawn(async move {
+            loop {
+                notify.notified().await;
+                resolver.resolve_now();
+            }
+        });
+
+        let _ = rx.recv();
+        Self {
+            cur_state: Mutex::new(ConnectivityState::Connecting),
+            lb,
+            abort_handle: jh.abort_handle(),
+        }
+    }
+
+    async fn call(&self, request: Request) -> Response {
+        // pre-pick tasks (e.g. deadlines, interceptors, retry)
+        // start attempt
+        // pick subchannel
+        // perform attempt on transport
+        self.lb.subchannel_pool.call(request).await
+    }
+}
+
+impl Drop for ActiveChannel {
+    fn drop(&mut self) {
+        self.abort_handle.abort();
+    }
 }
 
 // A channel that is not idle (connecting, ready, or erroring).
@@ -109,7 +250,6 @@ struct LoadBalancer {
     policy: std::sync::Mutex<Option<Arc<Box<dyn LbPolicy>>>>,
     policy_builder: std::sync::Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
     subchannel_pool: Arc<SubchannelPool>,
-    first_update: Notify,
 }
 
 impl LoadBalancer {
@@ -118,13 +258,9 @@ impl LoadBalancer {
             policy: std::sync::Mutex::default(),
             policy_builder: std::sync::Mutex::default(),
             subchannel_pool: Arc::new(SubchannelPool::new(request_resolution)),
-            first_update: Notify::new(),
         }
     }
-    async fn wait_for_resolver_update(&self) {
-        self.first_update.notified().await;
-    }
-    fn handle_update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error>> {
+    fn handle_update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
         let policy_name = pick_first::POLICY_NAME;
         if let ResolverUpdate::Data(ref d) = update {
             if d.service_config.is_some() {
@@ -157,15 +293,52 @@ impl LoadBalancer {
     }
 }
 
-#[async_trait]
-impl name_resolution::LoadBalancer for LoadBalancer {
-    fn parse_config(&self, config: &str) -> Result<ParsedServiceConfig, Box<dyn Error>> {
+struct LoadBalancerWrapper {
+    lb: Arc<LoadBalancer>,
+    tx: mpsc::UnboundedSender<Box<dyn FnOnce() + Send + Sync>>,
+    abort_handle: AbortHandle,
+}
+
+impl LoadBalancerWrapper {
+    fn new(lb: Arc<LoadBalancer>, got_update: Box<dyn FnOnce() + Send + Sync>) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Box<dyn FnOnce() + Sync + Send>>();
+        let jh = tokio::task::spawn(async move {
+            if let Some(f) = rx.recv().await {
+                f();
+            }
+            got_update();
+            while let Some(f) = rx.recv().await {
+                f();
+            }
+        });
+        Self {
+            lb,
+            tx,
+            abort_handle: jh.abort_handle(),
+        }
+    }
+}
+
+impl name_resolution::LoadBalancer for LoadBalancerWrapper {
+    fn parse_config(
+        &self,
+        config: &str,
+    ) -> Result<ParsedServiceConfig, Box<dyn Error + Send + Sync>> {
         Ok(ParsedServiceConfig {})
     }
-    fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error>> {
-        let res = self.handle_update(state);
-        self.first_update.notify_one();
-        res
+    fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let lb = self.lb.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.tx.send(Box::new(move || {
+            let _ = tx.send(lb.handle_update(state));
+        }))?;
+        rx.recv().unwrap()
+    }
+}
+
+impl Drop for LoadBalancerWrapper {
+    fn drop(&mut self) {
+        self.abort_handle.abort()
     }
 }
 
@@ -177,127 +350,3 @@ pub enum ConnectivityState {
     TransientFailure,
 }
 pub struct TODO;
-
-impl Channel {
-    pub fn new(
-        target: &str,
-        credentials: Option<Box<dyn Credentials>>,
-        runtime: Option<Box<dyn rt::Runtime>>,
-        options: ChannelOptions,
-    ) -> Self {
-        Self {
-            inner: Arc::new(PersistentChannel::new(
-                target,
-                credentials,
-                runtime,
-                options,
-            )),
-        }
-    }
-    // Waits until all outstanding RPCs are completed, then stops the client
-    // (via "drop"?).  Note that there probably needs to be a way to add a
-    // timeout here or for the application to do a hard failure while waiting.
-    // Or maybe this feature isn't necessary - Go doesn't have it.  Users can
-    // determine on their own if they have outstanding calls.  Some users have
-    // requested this feature for Go, nonetheless.
-    pub async fn graceful_stop(self) {}
-
-    // Causes the channel to enter idle mode immediately.  Any pending RPCs
-    // will continue on existing connections.
-    // TODO: do we want this?  Go does not have this.
-    //pub async fn enter_idle(&self) {}
-
-    /// Returns the current state of the channel.
-    pub fn state(&mut self, connect: bool) -> ConnectivityState {
-        let ac = self.inner.active_channel.lock().unwrap();
-        if let Some(ref ac) = *ac {
-            if let Some(s) = ac.lb.subchannel_pool.connectivity_state.cur() {
-                return *s;
-            }
-        }
-        ConnectivityState::Idle
-    }
-
-    /// Waits for the state of the channel to change from source.  Times out and returns an error after the deadline.
-    // TODO: do we want this or another API based on streaming?  Probably
-    // something like the Watcher<T> would be nice.
-    pub async fn wait_for_state_change(
-        &self,
-        source: ConnectivityState,
-        deadline: Instant,
-    ) -> Result<(), Box<dyn Error>> {
-        Ok(())
-    }
-
-    fn get_active_channel(&self) -> Arc<ActiveChannel> {
-        let mut s = self.inner.active_channel.lock().unwrap();
-        if s.is_none() {
-            *s = Some(Arc::new(ActiveChannel::new(self.inner.target.clone())));
-        }
-        s.clone().unwrap()
-    }
-
-    pub async fn call(&self, request: Request) -> Response {
-        let ac = self.get_active_channel();
-        ac.call(request).await
-    }
-}
-
-struct ActiveChannel {
-    cur_state: Mutex<ConnectivityState>,
-    lb: Arc<LoadBalancer>,
-    abort_handle: AbortHandle,
-}
-
-impl ActiveChannel {
-    fn new(target: Url) -> Self {
-        let notify = Arc::new(Notify::new());
-        let lb = Arc::new(LoadBalancer::new(notify.clone()));
-        let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
-        let resolver = rb
-            .unwrap()
-            .build(target.clone(), lb.clone(), ResolverOptions::default());
-        let jh = tokio::task::spawn(async move {
-            loop {
-                notify.notified().await;
-                resolver.resolve_now();
-            }
-        });
-        Self {
-            cur_state: Mutex::new(ConnectivityState::Connecting),
-            lb,
-            abort_handle: jh.abort_handle(),
-        }
-    }
-
-    async fn call(&self, request: Request) -> Response {
-        self.lb.wait_for_resolver_update().await;
-        // pre-pick tasks (e.g. deadlines, interceptors, retry)
-        // start attempt
-        // pick subchannel
-        // perform attempt on transport
-        self.lb.subchannel_pool.call(request).await
-    }
-}
-
-impl Drop for ActiveChannel {
-    fn drop(&mut self) {
-        self.abort_handle.abort();
-    }
-}
-
-impl PersistentChannel {
-    // Channels begin idle so new is a simple constructor.  Required parameters
-    // are not in ChannelOptions.
-    fn new(
-        target: &str,
-        credentials: Option<Box<dyn Credentials>>,
-        runtime: Option<Box<dyn rt::Runtime>>,
-        options: ChannelOptions,
-    ) -> Self {
-        Self {
-            target: Url::from_str(target).unwrap(), // TODO handle err
-            active_channel: std::sync::Mutex::default(),
-        }
-    }
-}

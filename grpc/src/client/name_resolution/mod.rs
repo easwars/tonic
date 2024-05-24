@@ -3,7 +3,6 @@ use core::fmt;
 use std::{
     error::Error,
     fmt::{Display, Formatter},
-    sync::Arc,
 };
 use url::Url;
 
@@ -23,7 +22,7 @@ pub trait ResolverBuilder: Send + Sync {
     fn build(
         &self,
         target: Url,
-        balancer: Arc<dyn LoadBalancer>,
+        balancer: Box<dyn LoadBalancer>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver>;
     /// Reports the URI scheme handled by this name resolver.
@@ -37,8 +36,11 @@ pub trait ResolverBuilder: Send + Sync {
 }
 
 pub trait LoadBalancer: Send + Sync {
-    fn parse_config(&self, config: &str) -> Result<ParsedServiceConfig, Box<dyn Error>>; // TODO
-    fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error>>;
+    fn parse_config(
+        &self,
+        config: &str,
+    ) -> Result<ParsedServiceConfig, Box<dyn Error + Send + Sync>>; // TODO
+    fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
 pub enum ResolverUpdate {

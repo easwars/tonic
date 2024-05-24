@@ -128,7 +128,7 @@ impl ResolverBuilder for InMemoryResolverBuilder {
     fn build(
         &self,
         target: url::Url,
-        balancer: Arc<dyn LoadBalancer>,
+        balancer: Box<dyn LoadBalancer>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver> {
         let id = target.path().strip_prefix("/").unwrap();
