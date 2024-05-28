@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::vec;
 
-use tokio::sync::{mpsc, oneshot, watch, Mutex, Notify};
+use tokio::sync::{mpsc, Mutex, Notify};
 use tokio::task::AbortHandle;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
