@@ -1,10 +1,10 @@
 use std::error::Error;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::vec;
 
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
@@ -21,7 +21,7 @@ use super::name_resolution::{
     GLOBAL_RESOLVER_REGISTRY,
 };
 use super::service_config::ParsedServiceConfig;
-use super::subchannel::SubchannelPool;
+use super::subchannel::InternalSubchannelPool;
 use super::transport::TransportRegistry;
 
 #[non_exhaustive]
@@ -115,11 +115,12 @@ impl Channel {
         }
     }
     // Waits until all outstanding RPCs are completed, then stops the client
-    // (via "drop"?).  Note that there probably needs to be a way to add a
-    // timeout here or for the application to do a hard failure while waiting.
-    // Or maybe this feature isn't necessary - Go doesn't have it.  Users can
-    // determine on their own if they have outstanding calls.  Some users have
-    // requested this feature for Go, nonetheless.
+    // (via "drop"? no, that makes no sense).  Note that there probably needs to
+    // be a way to add a timeout here or for the application to do a hard
+    // failure while waiting.  Or maybe this feature isn't necessary - Go
+    // doesn't have it.  Users can determine on their own if they have
+    // outstanding calls.  Some users have requested this feature for Go,
+    // nonetheless.
     pub async fn graceful_stop(self) {}
 
     // Causes the channel to enter idle mode immediately.  Any pending RPCs
@@ -174,7 +175,7 @@ impl Channel {
 
 struct PersistentChannel {
     target: Url,
-    active_channel: std::sync::Mutex<Option<Arc<ActiveChannel>>>,
+    active_channel: Mutex<Option<Arc<ActiveChannel>>>,
 }
 
 impl PersistentChannel {
@@ -188,41 +189,34 @@ impl PersistentChannel {
     ) -> Self {
         Self {
             target: Url::from_str(target).unwrap(), // TODO handle err
-            active_channel: std::sync::Mutex::default(),
+            active_channel: Mutex::default(),
         }
     }
 }
 
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
-    //resolver_handler: ResolverHandler,
     lb: Arc<LoadBalancer>,
     abort_handle: AbortHandle,
 }
 
 impl ActiveChannel {
     fn new(target: Url) -> Self {
-        let notify = Arc::new(Notify::new());
-        let lb = Arc::new(LoadBalancer::new(notify.clone()));
-        let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
+        let resolve_now_notify = Arc::new(Notify::new());
+        let lb = Arc::new(LoadBalancer::new(resolve_now_notify.clone()));
 
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let unblock = Box::new(move || {
-            let _ = tx.send(());
-        });
-
-        let rh = Box::new(LoadBalancerWrapper::new(lb.clone(), unblock));
-        let resolver = rb
-            .unwrap()
-            .build(target.clone(), rh, ResolverOptions::default());
+        let lb2 = lb.clone();
         let jh = tokio::task::spawn(async move {
+            let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
+            let resolver =
+                rb.unwrap()
+                    .build(target.clone(), Box::new(lb2), ResolverOptions::default());
             loop {
-                notify.notified().await;
+                resolve_now_notify.notified().await;
                 resolver.resolve_now();
             }
         });
 
-        let _ = rx.recv();
         Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
             lb,
@@ -247,20 +241,39 @@ impl Drop for ActiveChannel {
 
 // A channel that is not idle (connecting, ready, or erroring).
 struct LoadBalancer {
-    policy: std::sync::Mutex<Option<Arc<Box<dyn LbPolicy>>>>,
-    policy_builder: std::sync::Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
-    subchannel_pool: Arc<SubchannelPool>,
+    policy: Arc<Mutex<Option<Box<dyn LbPolicy>>>>, // TODO: replace with gsb which can be directly owned but has Mutex<Option> internally
+    policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
+    subchannel_pool: Arc<InternalSubchannelPool>,
 }
 
 impl LoadBalancer {
     fn new(request_resolution: Arc<Notify>) -> Self {
+        let policy = Arc::new(Mutex::new(None::<Box<dyn LbPolicy>>));
+
+        let subchannel_pool = Arc::new(InternalSubchannelPool::new(request_resolution));
+
+        let p2 = policy.clone();
+        let sp2 = subchannel_pool.clone();
+        tokio::task::spawn(async move {
+            while let Some(update) = sp2.next_update().await {
+                p2.lock()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .subchannel_update(&update);
+            }
+        });
+
         Self {
-            policy: std::sync::Mutex::default(),
-            policy_builder: std::sync::Mutex::default(),
-            subchannel_pool: Arc::new(SubchannelPool::new(request_resolution)),
+            policy_builder: Mutex::default(),
+            policy,
+            subchannel_pool,
         }
     }
-    fn handle_update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
+    fn handle_resolver_update(
+        &self,
+        update: ResolverUpdate,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let policy_name = pick_first::POLICY_NAME;
         if let ResolverUpdate::Data(ref d) = update {
             if d.service_config.is_some() {
@@ -275,7 +288,7 @@ impl LoadBalancer {
             let builder = GLOBAL_LB_REGISTRY.get_policy(policy_name).unwrap();
             let newpol = builder.build(self.subchannel_pool.clone(), LbPolicyOptions {});
             *self.policy_builder.lock().unwrap() = Some(builder);
-            *p = Some(Arc::new(newpol));
+            *p = Some(newpol);
         }
 
         // TODO: config should come from ParsedServiceConfig.
@@ -287,39 +300,13 @@ impl LoadBalancer {
             .unwrap()
             .parse_config("");
 
-        p.clone().unwrap().update(update, config)
+        p.as_mut().unwrap().resolver_update(update, config)
 
         // TODO: close old LB policy gracefully vs. drop?
     }
 }
 
-struct LoadBalancerWrapper {
-    lb: Arc<LoadBalancer>,
-    tx: mpsc::UnboundedSender<Box<dyn FnOnce() + Send + Sync>>,
-    abort_handle: AbortHandle,
-}
-
-impl LoadBalancerWrapper {
-    fn new(lb: Arc<LoadBalancer>, got_update: Box<dyn FnOnce() + Send + Sync>) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Box<dyn FnOnce() + Sync + Send>>();
-        let jh = tokio::task::spawn(async move {
-            if let Some(f) = rx.recv().await {
-                f();
-            }
-            got_update();
-            while let Some(f) = rx.recv().await {
-                f();
-            }
-        });
-        Self {
-            lb,
-            tx,
-            abort_handle: jh.abort_handle(),
-        }
-    }
-}
-
-impl name_resolution::LoadBalancer for LoadBalancerWrapper {
+impl name_resolution::LoadBalancer for Arc<LoadBalancer> {
     fn parse_config(
         &self,
         config: &str,
@@ -327,18 +314,7 @@ impl name_resolution::LoadBalancer for LoadBalancerWrapper {
         Ok(ParsedServiceConfig {})
     }
     fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let lb = self.lb.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.tx.send(Box::new(move || {
-            let _ = tx.send(lb.handle_update(state));
-        }))?;
-        rx.recv().unwrap()
-    }
-}
-
-impl Drop for LoadBalancerWrapper {
-    fn drop(&mut self) {
-        self.abort_handle.abort()
+        self.handle_resolver_update(state)
     }
 }
 
@@ -349,4 +325,5 @@ pub enum ConnectivityState {
     Ready,
     TransientFailure,
 }
+
 pub struct TODO;

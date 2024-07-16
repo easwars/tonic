@@ -84,7 +84,7 @@ pub struct Address {
 
 impl Display for Address {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("hi")
+        write!(f, "{}:{}", self.address_type, self.address)
     }
 }
 

@@ -1,4 +1,5 @@
-use std::any::Any;
+use std::collections::HashMap;
+use std::mem;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -6,7 +7,7 @@ use tokio::sync::{watch, Notify};
 use tokio::task::AbortHandle;
 use tonic::async_trait;
 
-use super::load_balancing::{self, Picker};
+use super::load_balancing::{self, Picker, Subchannel, SubchannelState, SubchannelUpdate};
 use super::name_resolution::Address;
 use super::transport::{self, ConnectedTransport, Transport};
 use super::ConnectivityState;
@@ -14,24 +15,24 @@ use crate::service::{Request, Response, Service};
 
 struct TODO;
 
-struct Subchannel {
+struct InternalSubchannel {
     t: Arc<dyn Transport>,
-    state: Mutex<SubchannelState>,
+    state: Mutex<InternalSubchannelState>,
     address: String,
     backoff: TODO,
-    listeners: Mutex<Vec<Box<dyn Fn(ConnectivityState) + Send + Sync>>>,
+    connectivity_state: Box<dyn Fn(SubchannelState) + Send + Sync>,
 }
 
 type SharedService = Arc<dyn ConnectedTransport>;
 
-enum SubchannelState {
+enum InternalSubchannelState {
     Idle,
     Connecting(AbortHandle),
     Ready(SharedService),
     TransientFailure(Instant),
 }
 
-impl SubchannelState {
+impl InternalSubchannelState {
     fn connected_transport(&self) -> Option<SharedService> {
         match self {
             Self::Ready(t) => Some(t.clone()),
@@ -40,23 +41,27 @@ impl SubchannelState {
     }
 }
 
-impl Drop for SubchannelState {
+impl Drop for InternalSubchannelState {
     fn drop(&mut self) {
-        if let SubchannelState::Connecting(ah) = self {
+        if let InternalSubchannelState::Connecting(ah) = self {
             ah.abort();
         }
     }
 }
 
-impl Subchannel {
+impl InternalSubchannel {
     /// Creates a new subchannel in idle state.
-    fn new(t: Arc<dyn Transport>, address: String) -> Self {
-        Subchannel {
+    fn new(
+        t: Arc<dyn Transport>,
+        address: String,
+        connectivity_state: Box<dyn Fn(SubchannelState) + Send + Sync>,
+    ) -> Self {
+        InternalSubchannel {
             t,
-            state: Mutex::new(SubchannelState::Idle),
+            state: Mutex::new(InternalSubchannelState::Idle),
             address,
             backoff: TODO,
-            listeners: Mutex::default(),
+            connectivity_state,
         }
     }
 
@@ -69,12 +74,14 @@ impl Subchannel {
     fn connect(&self, now: bool) {
         let mut state = self.state.lock().unwrap();
         match &*state {
-            SubchannelState::Idle => {
+            InternalSubchannelState::Idle => {
                 let n = Arc::new(Notify::new());
                 let n2 = n.clone();
                 // TODO: safe alternative? This task is aborted in drop so self
                 // can never outlive it.
-                let s = unsafe { std::mem::transmute::<&Subchannel, &'static Subchannel>(self) };
+                let s = unsafe {
+                    std::mem::transmute::<&InternalSubchannel, &'static InternalSubchannel>(self)
+                };
                 let fut = async move {
                     // Block until the Connecting state is set so we can't race
                     // and set Ready first.
@@ -89,70 +96,51 @@ impl Subchannel {
                     s.to_idle();
                 };
                 let jh = tokio::task::spawn(fut);
-                *state = SubchannelState::Connecting(jh.abort_handle());
+                *state = InternalSubchannelState::Connecting(jh.abort_handle());
                 n.notify_one();
             }
-            SubchannelState::TransientFailure(_) => {
+            InternalSubchannelState::TransientFailure(_) => {
                 // TODO: remember connect request and skip Idle when expires
             }
-            SubchannelState::Ready(_) => {} // Cannot connect while ready.
-            SubchannelState::Connecting(_) => {} // Already connecting.
+            InternalSubchannelState::Ready(_) => {} // Cannot connect while ready.
+            InternalSubchannelState::Connecting(_) => {} // Already connecting.
         }
     }
 
     fn to_ready(&self, svc: Arc<dyn ConnectedTransport>) {
-        *self.state.lock().unwrap() = SubchannelState::Ready(svc);
-        self.notify_listeners();
+        *self.state.lock().unwrap() = InternalSubchannelState::Ready(svc);
+        (self.connectivity_state)(SubchannelState {
+            connectivity_state: ConnectivityState::Ready,
+            last_connection_error: None,
+        });
     }
 
     fn to_idle(&self) {
-        *self.state.lock().unwrap() = SubchannelState::Idle;
-        self.notify_listeners();
+        *self.state.lock().unwrap() = InternalSubchannelState::Idle;
+        (self.connectivity_state)(SubchannelState {
+            connectivity_state: ConnectivityState::Idle,
+            last_connection_error: None,
+        });
     }
 
-    fn connectivity_state(&self) -> ConnectivityState {
+    /*fn connectivity_state(&self) -> ConnectivityState {
         match *self.state.lock().unwrap() {
-            SubchannelState::Idle => ConnectivityState::Idle,
-            SubchannelState::Connecting(_) => ConnectivityState::Connecting,
-            SubchannelState::Ready(_) => ConnectivityState::Ready,
-            SubchannelState::TransientFailure(_) => ConnectivityState::TransientFailure,
+            InternalSubchannelState::Idle => ConnectivityState::Idle,
+            InternalSubchannelState::Connecting(_) => ConnectivityState::Connecting,
+            InternalSubchannelState::Ready(_) => ConnectivityState::Ready,
+            InternalSubchannelState::TransientFailure(_) => ConnectivityState::TransientFailure,
         }
-    }
-
-    fn notify_listeners(&self) {
-        let state = self.connectivity_state();
-        let listeners = self.listeners.lock().unwrap();
-        for lis in &*listeners {
-            lis(state);
-        }
-    }
+    }*/
 }
 
-// TODO: this should be a wrapper type that allows sharing the real subchannel
-// between LB policies.
-impl load_balancing::Subchannel for Subchannel {
-    fn connect(&self) {
-        Subchannel::connect(self, false);
-    }
-
-    fn listen(
-        &self,
-        updates: Box<dyn Fn(super::ConnectivityState) + Send + Sync>, // TODO: stream/asynciter/channel probably
-    ) {
-        self.listeners.lock().unwrap().push(updates);
-    }
-
-    fn shutdown(&self) {
-        // Transition to idle.
-        *self.state.lock().unwrap() = SubchannelState::Idle;
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
+impl Drop for InternalSubchannel {
+    fn drop(&mut self) {
+        // TODO: remove self from pool.
     }
 }
 
 #[async_trait]
-impl Service for Subchannel {
+impl Service for InternalSubchannel {
     async fn call(&self, request: Request) -> Response {
         let svc = self
             .state
@@ -165,50 +153,101 @@ impl Service for Subchannel {
     }
 }
 
-pub(crate) struct SubchannelPool {
+pub(crate) struct InternalSubchannelPool {
+    subchannels: Mutex<HashMap<Subchannel, Arc<InternalSubchannel>>>,
+    subchannel_update: Arc<Mutex<SubchannelUpdate>>,
     picker: Watcher<Box<dyn Picker>>,
     pub(crate) connectivity_state: Watcher<ConnectivityState>,
     request_resolution: Arc<Notify>,
-    // TODO: HashSet<Subchannel>
+    update_send: watch::Sender<()>,
+    update_recv: tokio::sync::Mutex<watch::Receiver<()>>,
 }
 
-impl SubchannelPool {
+impl InternalSubchannelPool {
     pub(crate) fn new(request_resolution: Arc<Notify>) -> Self {
+        let (update_send, mut update_recv) = watch::channel(());
+        update_recv.mark_unchanged(); // Ignore the initial empty update.
+
         Self {
+            subchannels: Mutex::default(),
+            subchannel_update: Arc::default(),
             picker: Watcher::new(),
             connectivity_state: Watcher::new(),
             request_resolution,
+            update_send,
+            update_recv: tokio::sync::Mutex::new(update_recv),
         }
     }
     pub(crate) async fn call(&self, request: Request) -> Response {
         let mut i = self.picker.iter();
         loop {
             if let Some(p) = i.next().await {
-                let sc = p
+                let sc = &p
                     .pick(&request)
-                    .expect("TODO: handle picker errors (queue or fail RPC)");
-                let sc = sc
-                    .subchannel
-                    .as_any()
-                    .downcast_ref::<Subchannel>()
-                    .expect("Illegal Subchannel in pick");
+                    .expect("TODO: handle picker errors (queue or fail RPC)")
+                    .subchannel;
+                let scs = self.subchannels.lock().unwrap();
+                let sc = scs.get(sc).expect("Illegal Subchannel in pick");
                 return sc.call(request).await;
             }
         }
     }
+    /// Blocks until some SubchannelUpdate is ready to deliver, then returns it.
+    /// Returns None if dropped.
+    pub(crate) async fn next_update(&self) -> Option<SubchannelUpdate> {
+        // Await next update.
+        let mut recv = self.update_recv.lock().await;
+        if recv.changed().await.is_err() {
+            return None;
+        }
+        let scu = self.subchannel_update.lock();
+        recv.mark_unchanged(); // In case there was a race since the last watch update.
+        let v = mem::replace(&mut *scu.unwrap(), SubchannelUpdate::new());
+        Some(v)
+    }
 }
 
-impl load_balancing::SubchannelPool for SubchannelPool {
+impl load_balancing::SubchannelPool for InternalSubchannelPool {
     fn update(&self, update: load_balancing::LbState) {
         self.picker.update(update.picker);
         self.connectivity_state.update(update.connectivity_state);
     }
 
-    fn new_subchannel(&self, address: Arc<Address>) -> Arc<dyn load_balancing::Subchannel> {
+    fn new_subchannel(&self, address: Arc<Address>) -> Subchannel {
+        println!("creating subchannel for {address}");
         let t = transport::GLOBAL_TRANSPORT_REGISTRY
             .get_transport(&address.address_type)
             .unwrap();
-        Arc::new(Subchannel::new(t, address.address.clone()))
+
+        let n = Arc::new(Notify::new());
+        let sc = Subchannel::new(n.clone());
+        let update_chan = self.update_send.clone();
+        let sc2 = sc.clone();
+        let scu = self.subchannel_update.clone();
+        let cs_update = move |st| {
+            let mut scu = scu.lock().unwrap();
+            scu.set(&sc2, st);
+            let _ = update_chan.send(());
+        };
+        let isc = Arc::new(InternalSubchannel::new(
+            t,
+            address.address.clone(),
+            Box::new(cs_update),
+        ));
+        self.subchannels
+            .lock()
+            .unwrap()
+            .insert(sc.clone(), isc.clone());
+
+        // TODO: this will never exit or be aborted!
+        tokio::task::spawn(async move {
+            loop {
+                n.notified().await;
+                isc.connect(false);
+            }
+        });
+
+        sc
     }
 
     fn request_resolution(&self) {
@@ -256,7 +295,7 @@ pub(crate) struct WatcherIter<T> {
 // lock-free.
 
 impl<T> WatcherIter<T> {
-    // next returns None when the Watcher is dropped.
+    /// Returns the next unseen value
     pub(crate) async fn next(&mut self) -> Option<Arc<T>> {
         loop {
             self.rx.changed().await.ok()?;

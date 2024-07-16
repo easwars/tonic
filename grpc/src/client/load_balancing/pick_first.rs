@@ -41,12 +41,12 @@ pub fn reg() {
 #[derive(Clone)]
 struct Policy {
     ch: Arc<dyn SubchannelPool>,
-    sc: Arc<Mutex<Option<Arc<dyn Subchannel>>>>,
+    sc: Arc<Mutex<Option<Subchannel>>>,
 }
 
 impl LbPolicy for Policy {
-    fn update(
-        &self,
+    fn resolver_update(
+        &mut self,
         update: ResolverUpdate,
         config: Option<Box<dyn LbConfig>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -55,24 +55,9 @@ impl LbPolicy for Policy {
                 if let Some(a) = e.addresses.into_iter().next() {
                     let a = Arc::new(a);
                     let sc = self.ch.new_subchannel(a.clone());
-                    let old_sc = mem::replace(&mut *self.sc.lock().unwrap(), Some(sc.clone()));
-                    if let Some(o) = old_sc {
-                        o.shutdown();
-                    };
-                    let slf = self.clone();
-                    let sc2 = sc.clone();
-                    sc.listen(Box::new(move |s| {
-                        if s == ConnectivityState::Ready {
-                            let sc = sc2.clone();
-                            slf.ch.update(LbState {
-                                connectivity_state: s,
-                                picker: Box::new(OneSubchannelPicker { sc }),
-                            });
-                        }
-                    }));
+                    let _ = mem::replace(&mut *self.sc.lock().unwrap(), Some(sc.clone()));
                     sc.connect();
                     // TODO: return a picker that queues RPCs.
-                    self.ch.request_resolution();
                     return Ok(());
                 }
                 return Err("no addresses".into());
@@ -81,10 +66,24 @@ impl LbPolicy for Policy {
         }
         Err("unhandled".into())
     }
+
+    fn subchannel_update(&mut self, update: &super::SubchannelUpdate) {
+        if let Some(sc) = self.sc.lock().unwrap().clone() {
+            if update
+                .get(&sc)
+                .is_some_and(|ss| ss.connectivity_state == ConnectivityState::Ready)
+            {
+                self.ch.update(LbState {
+                    connectivity_state: ConnectivityState::Ready,
+                    picker: Box::new(OneSubchannelPicker { sc }),
+                });
+            }
+        }
+    }
 }
 
 struct OneSubchannelPicker {
-    sc: Arc<dyn Subchannel>,
+    sc: Subchannel,
 }
 
 impl Picker for OneSubchannelPicker {
