@@ -113,7 +113,7 @@ pub struct Pick {
 pub trait SubchannelPool: Send + Sync {
     /// Creates a new subchannel in IDLE state.
     fn new_subchannel(&self, address: Arc<Address>) -> Subchannel;
-    fn update(&self, update: LbState);
+    fn update_picker(&self, update: LbState);
     fn request_resolution(&self);
 }
 
@@ -127,9 +127,9 @@ pub trait SubchannelPool: Send + Sync {
 ///
 /// - READY transitions to IDLE when the connection is lost.
 ///
-/// - TRANSIENT_FAILURE transitions to IDLE when the reconnect backoff timer has
-///   expired.  This timer scales exponentially and is reset when the subchannel
-///   becomes READY.
+/// - TRANSIENT_FAILURE transitions to CONNECTING when the reconnect backoff
+///   timer has expired.  This timer scales exponentially and is reset when the
+///   subchannel becomes READY.
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.

@@ -73,7 +73,7 @@ impl LbPolicy for Policy {
                 .get(&sc)
                 .is_some_and(|ss| ss.connectivity_state == ConnectivityState::Ready)
             {
-                self.ch.update(LbState {
+                self.ch.update_picker(LbState {
                     connectivity_state: ConnectivityState::Ready,
                     picker: Box::new(OneSubchannelPicker { sc }),
                 });

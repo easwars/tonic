@@ -200,15 +200,18 @@ impl InternalSubchannelPool {
         if recv.changed().await.is_err() {
             return None;
         }
-        let scu = self.subchannel_update.lock();
-        recv.mark_unchanged(); // In case there was a race since the last watch update.
-        let v = mem::replace(&mut *scu.unwrap(), SubchannelUpdate::new());
-        Some(v)
+        let mut scu = self.subchannel_update.lock().unwrap();
+        // We can race between receiving the update notification and taking the
+        // lock.  Clear the recv again.
+        recv.mark_unchanged();
+
+        // Swap the current update with an empty one and return the current.
+        Some(mem::replace(&mut *scu, SubchannelUpdate::new()))
     }
 }
 
 impl load_balancing::SubchannelPool for InternalSubchannelPool {
-    fn update(&self, update: load_balancing::LbState) {
+    fn update_picker(&self, update: load_balancing::LbState) {
         self.picker.update(update.picker);
         self.connectivity_state.update(update.connectivity_state);
     }
