@@ -4,8 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::vec;
 
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::AbortHandle;
+
+use tonic::async_trait;
 use url::Url; // NOTE: http::Uri requires non-empty authority portion of URI
 
 use crate::attributes::Attributes;
@@ -14,10 +16,11 @@ use crate::rt;
 use crate::service::{Request, Response};
 
 use super::load_balancing::{
-    pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, GLOBAL_LB_REGISTRY,
+    self, pick_first, ChannelController, LbPolicy, LbPolicyBuilder, LbPolicyOptions,
+    LbPolicyRegistry, SubchannelUpdate, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
-    self, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
+    self, Resolver, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
 use super::service_config::ParsedServiceConfig;
@@ -141,7 +144,7 @@ impl Channel {
             // Otherwise, get or create the active channel.
             self.get_active_channel()
         };
-        if let Some(s) = ac.lb.subchannel_pool.connectivity_state.cur() {
+        if let Some(s) = ac.subchannel_pool.connectivity_state.cur() {
             return *s;
         }
         ConnectivityState::Idle
@@ -162,7 +165,7 @@ impl Channel {
     fn get_active_channel(&self) -> Arc<ActiveChannel> {
         let mut s = self.inner.active_channel.lock().unwrap();
         if s.is_none() {
-            *s = Some(Arc::new(ActiveChannel::new(self.inner.target.clone())));
+            *s = Some(ActiveChannel::new(self.inner.target.clone()));
         }
         s.clone().unwrap()
     }
@@ -196,32 +199,47 @@ impl PersistentChannel {
 
 struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
-    lb: Arc<LoadBalancer>,
     abort_handle: AbortHandle,
+    subchannel_pool: Arc<InternalSubchannelPool>,
+    resolver: Box<dyn Resolver>,
 }
 
 impl ActiveChannel {
-    fn new(target: Url) -> Self {
-        let resolve_now_notify = Arc::new(Notify::new());
-        let lb = Arc::new(LoadBalancer::new(resolve_now_notify.clone()));
+    fn new(target: Url) -> Arc<Self> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<WorkQueueItem>();
+        let scp = Arc::new(InternalSubchannelPool::new(tx.clone()));
 
-        let lb2 = lb.clone();
+        let resolve_now = Arc::new(Notify::new());
+
+        let mut channel_controller =
+            InternalChannelController::new(target.clone(), scp.clone(), resolve_now.clone());
+
         let jh = tokio::task::spawn(async move {
-            let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
-            let resolver =
-                rb.unwrap()
-                    .build(target.clone(), Box::new(lb2), ResolverOptions::default());
-            loop {
-                resolve_now_notify.notified().await;
-                resolver.resolve_now();
+            while let Some(w) = rx.recv().await {
+                w(&mut channel_controller);
             }
         });
 
-        Self {
+        let resolver_helper = Box::new(ResolverHelper::new(tx.clone()));
+        let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
+        let resolver = rb
+            .unwrap()
+            .build(target, resolve_now, ResolverOptions::default());
+
+        let slf = Arc::new(Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
-            lb,
             abort_handle: jh.abort_handle(),
-        }
+            subchannel_pool: scp,
+            resolver,
+        });
+
+        let slf2 = slf.clone();
+
+        tokio::task::spawn(async move {
+            slf2.resolver.start(resolver_helper).await;
+        });
+
+        slf
     }
 
     async fn call(&self, request: Request) -> Response {
@@ -229,7 +247,7 @@ impl ActiveChannel {
         // start attempt
         // pick subchannel
         // perform attempt on transport
-        self.lb.subchannel_pool.call(request).await
+        self.subchannel_pool.call(request).await
     }
 }
 
@@ -239,41 +257,60 @@ impl Drop for ActiveChannel {
     }
 }
 
-// A channel that is not idle (connecting, ready, or erroring).
-struct LoadBalancer {
-    policy: Arc<Mutex<Option<Box<dyn LbPolicy>>>>, // TODO: replace with gsb which can be directly owned but has Mutex<Option> internally
-    policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
-    subchannel_pool: Arc<InternalSubchannelPool>,
+pub(super) struct InternalChannelController {
+    pub(super) lb: Arc<GracefulSwitchBalancer>, // called and passes mutable parent to it, so must be Arc.
+    scp: Arc<InternalSubchannelPool>,
+    resolve_now: Arc<Notify>,
 }
 
-impl LoadBalancer {
-    fn new(request_resolution: Arc<Notify>) -> Self {
-        let policy = Arc::new(Mutex::new(None::<Box<dyn LbPolicy>>));
-
-        let subchannel_pool = Arc::new(InternalSubchannelPool::new(request_resolution));
-
-        let p2 = policy.clone();
-        let sp2 = subchannel_pool.clone();
-        tokio::task::spawn(async move {
-            while let Some(update) = sp2.next_update().await {
-                p2.lock()
-                    .unwrap()
-                    .as_mut()
-                    .unwrap()
-                    .subchannel_update(&update);
-            }
-        });
+impl InternalChannelController {
+    fn new(target: Url, scp: Arc<InternalSubchannelPool>, resolve_now: Arc<Notify>) -> Self {
+        let lb = Arc::new(GracefulSwitchBalancer::new());
 
         Self {
+            lb,
+            scp,
+            resolve_now,
+        }
+    }
+}
+
+impl load_balancing::ChannelController for InternalChannelController {
+    fn new_subchannel(
+        &mut self,
+        address: Arc<name_resolution::Address>,
+    ) -> load_balancing::Subchannel {
+        self.scp.new_subchannel(address)
+    }
+
+    fn update_picker(&mut self, update: load_balancing::LbState) {
+        self.scp.update_picker(update);
+    }
+
+    fn request_resolution(&mut self) {
+        self.resolve_now.notify_one();
+    }
+}
+
+// A channel that is not idle (connecting, ready, or erroring).
+pub(super) struct GracefulSwitchBalancer {
+    policy: Arc<Mutex<Option<Box<dyn LbPolicy>>>>,
+    policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
+}
+
+impl GracefulSwitchBalancer {
+    fn new() -> Self {
+        Self {
             policy_builder: Mutex::default(),
-            policy,
-            subchannel_pool,
+            policy: Arc::new(Mutex::new(None::<Box<dyn LbPolicy>>)),
         }
     }
     fn handle_resolver_update(
         &self,
         update: ResolverUpdate,
+        controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        dbg!();
         let policy_name = pick_first::POLICY_NAME;
         if let ResolverUpdate::Data(ref d) = update {
             if d.service_config.is_some() {
@@ -286,7 +323,7 @@ impl LoadBalancer {
         let mut p = self.policy.lock().unwrap();
         if p.is_none() {
             let builder = GLOBAL_LB_REGISTRY.get_policy(policy_name).unwrap();
-            let newpol = builder.build(self.subchannel_pool.clone(), LbPolicyOptions {});
+            let newpol = builder.build(LbPolicyOptions {});
             *self.policy_builder.lock().unwrap() = Some(builder);
             *p = Some(newpol);
         }
@@ -300,21 +337,54 @@ impl LoadBalancer {
             .unwrap()
             .parse_config("");
 
-        p.as_mut().unwrap().resolver_update(update, config)
+        p.as_mut()
+            .unwrap()
+            .resolver_update(update, config, controller)
 
         // TODO: close old LB policy gracefully vs. drop?
     }
+    pub(super) fn subchannel_update(
+        &self,
+        update: SubchannelUpdate,
+        channel_controller: &mut dyn ChannelController,
+    ) {
+        let mut p = self.policy.lock().unwrap();
+
+        p.as_mut()
+            .unwrap()
+            .subchannel_update(&update, channel_controller);
+    }
 }
 
-impl name_resolution::LoadBalancer for Arc<LoadBalancer> {
+pub(super) type WorkQueueItem = Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>;
+
+pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
+
+struct ResolverHelper {
+    tx: WorkQueueTx,
+}
+
+impl ResolverHelper {
+    fn new(tx: mpsc::UnboundedSender<WorkQueueItem>) -> Self {
+        Self { tx }
+    }
+}
+
+#[async_trait]
+impl name_resolution::ChannelController for ResolverHelper {
     fn parse_config(
         &self,
         config: &str,
     ) -> Result<ParsedServiceConfig, Box<dyn Error + Send + Sync>> {
         Ok(ParsedServiceConfig {})
+        // Needs to call gsb's policy builder
     }
-    fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.handle_resolver_update(state)
+    async fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(Box::new(|c: &mut InternalChannelController| {
+            let _ = tx.send(c.lb.clone().handle_resolver_update(state, c));
+        }))?;
+        rx.await?
     }
 }
 

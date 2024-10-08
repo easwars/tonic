@@ -10,7 +10,8 @@ use crate::{
 };
 
 use super::{
-    LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, Picker, Subchannel, SubchannelPool,
+    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, Picker,
+    Subchannel,
 };
 
 pub static POLICY_NAME: &str = "pick_first";
@@ -18,15 +19,8 @@ pub static POLICY_NAME: &str = "pick_first";
 struct Builder {}
 
 impl LbPolicyBuilder for Builder {
-    fn build(
-        &self,
-        channel: Arc<dyn SubchannelPool>,
-        options: LbPolicyOptions,
-    ) -> Box<dyn LbPolicy> {
-        Box::new(Policy {
-            ch: channel,
-            sc: Arc::default(),
-        })
+    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
+        Box::new(Policy { sc: Arc::default() })
     }
 
     fn name(&self) -> &'static str {
@@ -40,7 +34,6 @@ pub fn reg() {
 
 #[derive(Clone)]
 struct Policy {
-    ch: Arc<dyn SubchannelPool>,
     sc: Arc<Mutex<Option<Subchannel>>>,
 }
 
@@ -49,12 +42,13 @@ impl LbPolicy for Policy {
         &mut self,
         update: ResolverUpdate,
         config: Option<Box<dyn LbConfig>>,
+        channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         if let ResolverUpdate::Data(u) = update {
             if let Some(e) = u.endpoints.into_iter().next() {
                 if let Some(a) = e.addresses.into_iter().next() {
                     let a = Arc::new(a);
-                    let sc = self.ch.new_subchannel(a.clone());
+                    let sc = channel_controller.new_subchannel(a.clone());
                     let _ = mem::replace(&mut *self.sc.lock().unwrap(), Some(sc.clone()));
                     sc.connect();
                     // TODO: return a picker that queues RPCs.
@@ -67,13 +61,17 @@ impl LbPolicy for Policy {
         Err("unhandled".into())
     }
 
-    fn subchannel_update(&mut self, update: &super::SubchannelUpdate) {
+    fn subchannel_update(
+        &mut self,
+        update: &super::SubchannelUpdate,
+        channel_controller: &mut dyn ChannelController,
+    ) {
         if let Some(sc) = self.sc.lock().unwrap().clone() {
             if update
                 .get(&sc)
                 .is_some_and(|ss| ss.connectivity_state == ConnectivityState::Ready)
             {
-                self.ch.update_picker(LbState {
+                channel_controller.update_picker(LbState {
                     connectivity_state: ConnectivityState::Ready,
                     picker: Box::new(OneSubchannelPicker { sc }),
                 });

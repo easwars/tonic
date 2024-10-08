@@ -3,7 +3,11 @@ use core::fmt;
 use std::{
     error::Error,
     fmt::{Display, Formatter},
+    sync::Arc,
 };
+use tokio::sync::Notify;
+
+use tonic::async_trait;
 use url::Url;
 
 use crate::attributes::Attributes;
@@ -22,7 +26,7 @@ pub trait ResolverBuilder: Send + Sync {
     fn build(
         &self,
         target: Url,
-        balancer: Box<dyn LoadBalancer>,
+        resolve_now: Arc<Notify>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver>;
     /// Reports the URI scheme handled by this name resolver.
@@ -35,12 +39,13 @@ pub trait ResolverBuilder: Send + Sync {
     }
 }
 
-pub trait LoadBalancer: Send + Sync {
+#[async_trait]
+pub trait ChannelController: Send + Sync {
     fn parse_config(
         &self,
         config: &str,
     ) -> Result<ParsedServiceConfig, Box<dyn Error + Send + Sync>>; // TODO
-    fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>>;
+    async fn update(&self, update: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
 pub enum ResolverUpdate {
@@ -90,6 +95,7 @@ impl Display for Address {
 
 pub static TCP_IP_ADDRESS_TYPE: &str = "tcp";
 
+#[async_trait]
 pub trait Resolver: Send + Sync {
-    fn resolve_now(&self);
+    async fn start(&self, channel_controller: Box<dyn ChannelController>);
 }

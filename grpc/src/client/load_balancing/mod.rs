@@ -28,11 +28,7 @@ pub struct LbPolicyOptions {}
 /// An LB policy factory
 pub trait LbPolicyBuilder: Send + Sync {
     /// Builds an LB policy instance, or returns an error.
-    fn build(
-        &self,
-        subchannel_pool: Arc<dyn SubchannelPool>,
-        options: LbPolicyOptions,
-    ) -> Box<dyn LbPolicy>;
+    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
     fn parse_config(&self, config: &str) -> Option<Box<dyn LbConfig>> {
@@ -40,13 +36,26 @@ pub trait LbPolicyBuilder: Send + Sync {
     }
 }
 
+pub trait LbWorkerRunner {
+    fn queue_work(&self, work: impl LbWorker);
+}
+
+pub trait LbWorker: Send + Sync {
+    fn work(&self, channel_controller: &mut dyn ChannelController);
+}
+
 pub trait LbPolicy: Send + Sync {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
         config: Option<Box<dyn LbConfig>>,
+        channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
-    fn subchannel_update(&mut self, update: &SubchannelUpdate);
+    fn subchannel_update(
+        &mut self,
+        update: &SubchannelUpdate,
+        channel_controller: &mut dyn ChannelController,
+    );
 }
 
 pub struct SubchannelUpdate {
@@ -105,16 +114,16 @@ pub struct LbState {
 
 pub struct Pick {
     pub subchannel: Subchannel,
-    pub on_complete: Option<Box<dyn FnOnce(&Response) + Send + Sync>>,
+    pub on_complete: Option<Box<dyn Fn(&Response) + Send + Sync>>,
     pub metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
 }
 
-/// Creates and manages subchannels.
-pub trait SubchannelPool: Send + Sync {
+/// Controls channel behaviors.
+pub trait ChannelController: Send + Sync {
     /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(&self, address: Arc<Address>) -> Subchannel;
-    fn update_picker(&self, update: LbState);
-    fn request_resolution(&self);
+    fn new_subchannel(&mut self, address: Arc<Address>) -> Subchannel;
+    fn update_picker(&mut self, update: LbState);
+    fn request_resolution(&mut self);
 }
 
 /// A Subchannel represents a method of communicating with an address which may

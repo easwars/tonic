@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::mem;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -7,10 +6,12 @@ use tokio::sync::{watch, Notify};
 use tokio::task::AbortHandle;
 use tonic::async_trait;
 
+use super::channel::WorkQueueTx;
 use super::load_balancing::{self, Picker, Subchannel, SubchannelState, SubchannelUpdate};
 use super::name_resolution::Address;
 use super::transport::{self, ConnectedTransport, Transport};
 use super::ConnectivityState;
+use crate::client::channel::InternalChannelController;
 use crate::service::{Request, Response, Service};
 
 struct TODO;
@@ -158,24 +159,17 @@ pub(crate) struct InternalSubchannelPool {
     subchannel_update: Arc<Mutex<SubchannelUpdate>>,
     picker: Watcher<Box<dyn Picker>>,
     pub(crate) connectivity_state: Watcher<ConnectivityState>,
-    request_resolution: Arc<Notify>,
-    update_send: watch::Sender<()>,
-    update_recv: tokio::sync::Mutex<watch::Receiver<()>>,
+    wtx: WorkQueueTx,
 }
 
 impl InternalSubchannelPool {
-    pub(crate) fn new(request_resolution: Arc<Notify>) -> Self {
-        let (update_send, mut update_recv) = watch::channel(());
-        update_recv.mark_unchanged(); // Ignore the initial empty update.
-
+    pub(crate) fn new(wtx: WorkQueueTx) -> Self {
         Self {
             subchannels: Mutex::default(),
             subchannel_update: Arc::default(),
             picker: Watcher::new(),
             connectivity_state: Watcher::new(),
-            request_resolution,
-            update_send,
-            update_recv: tokio::sync::Mutex::new(update_recv),
+            wtx,
         }
     }
     pub(crate) async fn call(&self, request: Request) -> Response {
@@ -192,31 +186,13 @@ impl InternalSubchannelPool {
             }
         }
     }
-    /// Blocks until some SubchannelUpdate is ready to deliver, then returns it.
-    /// Returns None if dropped.
-    pub(crate) async fn next_update(&self) -> Option<SubchannelUpdate> {
-        // Await next update.
-        let mut recv = self.update_recv.lock().await;
-        if recv.changed().await.is_err() {
-            return None;
-        }
-        let mut scu = self.subchannel_update.lock().unwrap();
-        // We can race between receiving the update notification and taking the
-        // lock.  Clear the recv again.
-        recv.mark_unchanged();
 
-        // Swap the current update with an empty one and return the current.
-        Some(mem::replace(&mut *scu, SubchannelUpdate::new()))
-    }
-}
-
-impl load_balancing::SubchannelPool for InternalSubchannelPool {
-    fn update_picker(&self, update: load_balancing::LbState) {
+    pub(super) fn update_picker(&self, update: load_balancing::LbState) {
         self.picker.update(update.picker);
         self.connectivity_state.update(update.connectivity_state);
     }
 
-    fn new_subchannel(&self, address: Arc<Address>) -> Subchannel {
+    pub(super) fn new_subchannel(&self, address: Arc<Address>) -> Subchannel {
         println!("creating subchannel for {address}");
         let t = transport::GLOBAL_TRANSPORT_REGISTRY
             .get_transport(&address.address_type)
@@ -224,13 +200,14 @@ impl load_balancing::SubchannelPool for InternalSubchannelPool {
 
         let n = Arc::new(Notify::new());
         let sc = Subchannel::new(n.clone());
-        let update_chan = self.update_send.clone();
         let sc2 = sc.clone();
-        let scu = self.subchannel_update.clone();
+        let wtx = self.wtx.clone();
         let cs_update = move |st| {
-            let mut scu = scu.lock().unwrap();
+            let mut scu = SubchannelUpdate::new();
             scu.set(&sc2, st);
-            let _ = update_chan.send(());
+            let _ = wtx.send(Box::new(|c: &mut InternalChannelController| {
+                c.lb.clone().subchannel_update(scu, c);
+            }));
         };
         let isc = Arc::new(InternalSubchannel::new(
             t,
@@ -251,10 +228,6 @@ impl load_balancing::SubchannelPool for InternalSubchannelPool {
         });
 
         sc
-    }
-
-    fn request_resolution(&self) {
-        self.request_resolution.notify_one();
     }
 }
 

@@ -4,9 +4,10 @@ use std::{
 };
 
 use once_cell::sync::Lazy;
+use tokio::sync::Notify;
 use url::Url;
 
-use super::{LoadBalancer, Resolver, ResolverBuilder, ResolverOptions};
+use super::{Resolver, ResolverBuilder, ResolverOptions};
 
 #[derive(Clone)]
 pub struct SharedResolverBuilder {
@@ -20,17 +21,17 @@ impl SharedResolverBuilder {
 }
 
 impl ResolverBuilder for SharedResolverBuilder {
+    fn scheme(&self) -> &'static str {
+        self.rb.scheme()
+    }
+
     fn build(
         &self,
         target: Url,
-        handler: Box<dyn LoadBalancer>,
+        resolve_now: Arc<Notify>,
         options: ResolverOptions,
     ) -> Box<dyn Resolver> {
-        self.rb.build(target, handler, options)
-    }
-
-    fn scheme(&self) -> &'static str {
-        self.rb.scheme()
+        self.rb.build(target, resolve_now, options)
     }
 }
 

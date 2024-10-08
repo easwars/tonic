@@ -9,7 +9,7 @@ use std::{
 use crate::{
     client::{
         name_resolution::{
-            Address, Endpoint, LoadBalancer, Resolver, ResolverBuilder, ResolverData,
+            Address, ChannelController, Endpoint, Resolver, ResolverBuilder, ResolverData,
             ResolverOptions, ResolverUpdate, SharedResolverBuilder, GLOBAL_RESOLVER_REGISTRY,
         },
         transport::{self, ConnectedTransport, GLOBAL_TRANSPORT_REGISTRY},
@@ -125,36 +125,44 @@ pub fn reg() {
 struct InMemoryResolverBuilder;
 
 impl ResolverBuilder for InMemoryResolverBuilder {
-    fn build(
-        &self,
-        target: url::Url,
-        balancer: Box<dyn LoadBalancer>,
-        options: ResolverOptions,
-    ) -> Box<dyn Resolver> {
-        let id = target.path().strip_prefix("/").unwrap();
-        let _ = balancer.update(ResolverUpdate::Data(ResolverData {
-            endpoints: vec![Endpoint {
-                addresses: vec![Address {
-                    address_type: INMEMORY_ADDRESS_TYPE.to_string(),
-                    address: id.to_string(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }));
-
-        Box::new(NopResolver {})
-    }
+    // fn build(&self, target: url::Url, options: ResolverOptions) -> Box<dyn Resolver> {
+    // }
 
     fn scheme(&self) -> &'static str {
         "inmemory"
     }
+
+    fn build(
+        &self,
+        target: url::Url,
+        resolve_now: Arc<Notify>,
+        options: ResolverOptions,
+    ) -> Box<dyn Resolver> {
+        let id = target.path().strip_prefix("/").unwrap().to_string();
+
+        Box::new(NopResolver { id })
+    }
 }
 
-struct NopResolver {}
+struct NopResolver {
+    id: String,
+}
 
+#[async_trait]
 impl Resolver for NopResolver {
-    // Ignored as there is no way to re-resolve the in-memory resolver.
-    fn resolve_now(&self) {}
+    async fn start(&self, channel_controller: Box<dyn ChannelController>) {
+        let _ = channel_controller
+            .update(ResolverUpdate::Data(ResolverData {
+                endpoints: vec![Endpoint {
+                    addresses: vec![Address {
+                        address_type: INMEMORY_ADDRESS_TYPE.to_string(),
+                        address: self.id.clone(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await;
+    }
 }
