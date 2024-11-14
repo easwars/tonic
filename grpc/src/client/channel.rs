@@ -17,7 +17,7 @@ use crate::service::{Request, Response};
 
 use super::load_balancing::{
     self, pick_first, ChannelController, LbPolicy, LbPolicyBuilder, LbPolicyOptions,
-    LbPolicyRegistry, SubchannelUpdate, GLOBAL_LB_REGISTRY,
+    LbPolicyRegistry, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
     self, Resolver, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
@@ -211,8 +211,12 @@ impl ActiveChannel {
 
         let resolve_now = Arc::new(Notify::new());
 
-        let mut channel_controller =
-            InternalChannelController::new(target.clone(), scp.clone(), resolve_now.clone());
+        let mut channel_controller = InternalChannelController::new(
+            target.clone(),
+            scp.clone(),
+            resolve_now.clone(),
+            tx.clone(),
+        );
 
         let jh = tokio::task::spawn(async move {
             while let Some(w) = rx.recv().await {
@@ -264,8 +268,13 @@ pub(super) struct InternalChannelController {
 }
 
 impl InternalChannelController {
-    fn new(target: Url, scp: Arc<InternalSubchannelPool>, resolve_now: Arc<Notify>) -> Self {
-        let lb = Arc::new(GracefulSwitchBalancer::new());
+    fn new(
+        target: Url,
+        scp: Arc<InternalSubchannelPool>,
+        resolve_now: Arc<Notify>,
+        wqtx: WorkQueueTx,
+    ) -> Self {
+        let lb = Arc::new(GracefulSwitchBalancer::new(wqtx));
 
         Self {
             lb,
@@ -276,10 +285,7 @@ impl InternalChannelController {
 }
 
 impl load_balancing::ChannelController for InternalChannelController {
-    fn new_subchannel(
-        &mut self,
-        address: Arc<name_resolution::Address>,
-    ) -> load_balancing::Subchannel {
+    fn new_subchannel(&mut self, address: &name_resolution::Address) -> load_balancing::Subchannel {
         self.scp.new_subchannel(address)
     }
 
@@ -296,13 +302,29 @@ impl load_balancing::ChannelController for InternalChannelController {
 pub(super) struct GracefulSwitchBalancer {
     policy: Arc<Mutex<Option<Box<dyn LbPolicy>>>>,
     policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
+    work_scheduler: WorkQueueTx,
+}
+
+impl WorkScheduler for WorkQueueTx {
+    fn schedule_work(&self, data: Box<dyn std::any::Any + Send + Sync>) {
+        let _ = self.send(Box::new(|c: &mut InternalChannelController| {
+            c.lb.clone()
+                .policy
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .work(c, data);
+        }));
+    }
 }
 
 impl GracefulSwitchBalancer {
-    fn new() -> Self {
+    fn new(work_scheduler: WorkQueueTx) -> Self {
         Self {
             policy_builder: Mutex::default(),
             policy: Arc::new(Mutex::new(None::<Box<dyn LbPolicy>>)),
+            work_scheduler,
         }
     }
     fn handle_resolver_update(
@@ -323,7 +345,9 @@ impl GracefulSwitchBalancer {
         let mut p = self.policy.lock().unwrap();
         if p.is_none() {
             let builder = GLOBAL_LB_REGISTRY.get_policy(policy_name).unwrap();
-            let newpol = builder.build(LbPolicyOptions {});
+            let newpol = builder.build(LbPolicyOptions {
+                work_scheduler: Box::new(self.work_scheduler.clone()),
+            });
             *self.policy_builder.lock().unwrap() = Some(builder);
             *p = Some(newpol);
         }
@@ -365,7 +389,7 @@ struct ResolverHelper {
 }
 
 impl ResolverHelper {
-    fn new(tx: mpsc::UnboundedSender<WorkQueueItem>) -> Self {
+    fn new(tx: WorkQueueTx) -> Self {
         Self { tx }
     }
 }

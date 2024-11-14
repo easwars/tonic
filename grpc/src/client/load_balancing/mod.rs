@@ -23,7 +23,9 @@ pub mod pick_first;
 mod registry;
 pub use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};
 
-pub struct LbPolicyOptions {}
+pub struct LbPolicyOptions {
+    pub work_scheduler: Box<dyn WorkScheduler>,
+}
 
 /// An LB policy factory
 pub trait LbPolicyBuilder: Send + Sync {
@@ -36,12 +38,8 @@ pub trait LbPolicyBuilder: Send + Sync {
     }
 }
 
-pub trait LbWorkerRunner {
-    fn queue_work(&self, work: impl LbWorker);
-}
-
-pub trait LbWorker: Send + Sync {
-    fn work(&self, channel_controller: &mut dyn ChannelController);
+pub trait WorkScheduler: Send + Sync {
+    fn schedule_work(&self, data: Box<dyn Any + Send + Sync>);
 }
 
 pub trait LbPolicy: Send + Sync {
@@ -55,6 +53,11 @@ pub trait LbPolicy: Send + Sync {
         &mut self,
         update: &SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
+    );
+    fn work(
+        &mut self,
+        channel_controller: &mut dyn ChannelController,
+        data: Box<dyn Any + Send + Sync>,
     );
 }
 
@@ -121,7 +124,7 @@ pub struct Pick {
 /// Controls channel behaviors.
 pub trait ChannelController: Send + Sync {
     /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(&mut self, address: Arc<Address>) -> Subchannel;
+    fn new_subchannel(&mut self, address: &Address) -> Subchannel;
     fn update_picker(&mut self, update: LbState);
     fn request_resolution(&mut self);
 }
@@ -178,3 +181,33 @@ impl PartialEq for Subchannel {
 }
 
 impl Eq for Subchannel {}
+
+pub trait LbPolicyBuilderCallbacks: Send + Sync {
+    /// Builds an LB policy instance, or returns an error.
+    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicyCallbacks>;
+    /// Reports the name of the LB Policy.
+    fn name(&self) -> &'static str;
+    fn parse_config(&self, config: &str) -> Option<Box<dyn LbConfig>> {
+        None
+    }
+}
+
+pub trait LbPolicyCallbacks: Send + Sync {
+    fn resolver_update(
+        &mut self,
+        update: ResolverUpdate,
+        config: Option<Box<dyn LbConfig>>,
+        channel_controller: &mut dyn ChannelControllerCallbacks,
+    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+}
+
+pub trait ChannelControllerCallbacks: Send + Sync {
+    /// Creates a new subchannel in IDLE state.
+    fn new_subchannel(
+        &mut self,
+        address: &Address,
+        updates: Box<dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks)>,
+    ) -> Subchannel;
+    fn update_picker(&mut self, update: LbState);
+    fn request_resolution(&mut self);
+}

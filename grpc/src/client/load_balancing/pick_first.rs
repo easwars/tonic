@@ -1,8 +1,4 @@
-use std::{
-    error::Error,
-    mem,
-    sync::{Arc, Mutex},
-};
+use std::error::Error;
 
 use crate::{
     client::{load_balancing::LbState, name_resolution::ResolverUpdate, ConnectivityState},
@@ -11,7 +7,7 @@ use crate::{
 
 use super::{
     ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, Picker,
-    Subchannel,
+    Subchannel, WorkScheduler,
 };
 
 pub static POLICY_NAME: &str = "pick_first";
@@ -20,7 +16,10 @@ struct Builder {}
 
 impl LbPolicyBuilder for Builder {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
-        Box::new(Policy { sc: Arc::default() })
+        Box::new(PickFirstPolicy {
+            work_scheduler: options.work_scheduler,
+            subchannel: None,
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -32,33 +31,35 @@ pub fn reg() {
     super::GLOBAL_LB_REGISTRY.add_builder(Builder {})
 }
 
-#[derive(Clone)]
-struct Policy {
-    sc: Arc<Mutex<Option<Subchannel>>>,
+struct PickFirstPolicy {
+    work_scheduler: Box<dyn WorkScheduler>,
+    subchannel: Option<Subchannel>,
 }
 
-impl LbPolicy for Policy {
+impl LbPolicy for PickFirstPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
         config: Option<Box<dyn LbConfig>>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let ResolverUpdate::Data(u) = update {
-            if let Some(e) = u.endpoints.into_iter().next() {
-                if let Some(a) = e.addresses.into_iter().next() {
-                    let a = Arc::new(a);
-                    let sc = channel_controller.new_subchannel(a.clone());
-                    let _ = mem::replace(&mut *self.sc.lock().unwrap(), Some(sc.clone()));
-                    sc.connect();
-                    // TODO: return a picker that queues RPCs.
-                    return Ok(());
-                }
-                return Err("no addresses".into());
-            }
-            return Err("no endpoints".into());
-        }
-        Err("unhandled".into())
+        let ResolverUpdate::Data(update) = update else {
+            return Err("unhandled".into());
+        };
+        let address = update
+            .endpoints
+            .first()
+            .ok_or("no endpoints")?
+            .addresses
+            .first()
+            .ok_or("no addresses")?;
+        let sc = channel_controller.new_subchannel(address);
+        self.subchannel = Some(sc.clone());
+        sc.connect();
+        self.work_scheduler
+            .schedule_work(Box::new("call me maybe?"));
+        // TODO: return a picker that queues RPCs.
+        Ok(())
     }
 
     fn subchannel_update(
@@ -66,17 +67,28 @@ impl LbPolicy for Policy {
         update: &super::SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     ) {
-        if let Some(sc) = self.sc.lock().unwrap().clone() {
-            if update
-                .get(&sc)
-                .is_some_and(|ss| ss.connectivity_state == ConnectivityState::Ready)
-            {
-                channel_controller.update_picker(LbState {
-                    connectivity_state: ConnectivityState::Ready,
-                    picker: Box::new(OneSubchannelPicker { sc }),
-                });
-            }
+        dbg!();
+
+        let Some(sc) = self.subchannel.clone() else {
+            return;
+        };
+        if update
+            .get(&sc)
+            .is_none_or(|ss| ss.connectivity_state != ConnectivityState::Ready)
+        {
+            // Ignore updates for subchannels other than our subchannel, or if
+            // the state is not Ready.
+            return;
         }
+
+        channel_controller.update_picker(LbState {
+            connectivity_state: ConnectivityState::Ready,
+            picker: Box::new(OneSubchannelPicker { sc }),
+        });
+    }
+
+    fn work(&mut self, _: &mut dyn ChannelController, data: Box<dyn std::any::Any + Send + Sync>) {
+        println!("Called with {}", data.downcast_ref::<&str>().unwrap());
     }
 }
 

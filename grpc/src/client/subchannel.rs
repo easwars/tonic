@@ -192,7 +192,7 @@ impl InternalSubchannelPool {
         self.connectivity_state.update(update.connectivity_state);
     }
 
-    pub(super) fn new_subchannel(&self, address: Arc<Address>) -> Subchannel {
+    pub(super) fn new_subchannel(&self, address: &Address) -> Subchannel {
         println!("creating subchannel for {address}");
         let t = transport::GLOBAL_TRANSPORT_REGISTRY
             .get_transport(&address.address_type)
