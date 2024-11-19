@@ -1,7 +1,19 @@
-use std::error::Error;
+use std::{
+    error::Error,
+    mem,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use tokio::time::sleep;
+use tonic::transport::channel;
 
 use crate::{
-    client::{load_balancing::LbState, name_resolution::ResolverUpdate, ConnectivityState},
+    client::{
+        load_balancing::LbState,
+        name_resolution::{Address, ResolverUpdate},
+        ConnectivityState,
+    },
     service::Request,
 };
 
@@ -18,7 +30,8 @@ impl LbPolicyBuilder for Builder {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
         Box::new(PickFirstPolicy {
             work_scheduler: options.work_scheduler,
-            subchannel: None,
+            subchannels: vec![],
+            next_addresses: Arc::default(),
         })
     }
 
@@ -32,8 +45,9 @@ pub fn reg() {
 }
 
 struct PickFirstPolicy {
-    work_scheduler: Box<dyn WorkScheduler>,
-    subchannel: Option<Subchannel>,
+    work_scheduler: Arc<dyn WorkScheduler>,
+    subchannels: Vec<Subchannel>,
+    next_addresses: Arc<Mutex<Vec<Address>>>,
 }
 
 impl LbPolicy for PickFirstPolicy {
@@ -46,18 +60,27 @@ impl LbPolicy for PickFirstPolicy {
         let ResolverUpdate::Data(update) = update else {
             return Err("unhandled".into());
         };
-        let address = update
+        //let endpoints = mem::replace(&mut update.endpoints, vec![]);
+        let mut addresses = update
             .endpoints
-            .first()
+            .into_iter()
+            .next()
             .ok_or("no endpoints")?
-            .addresses
-            .first()
-            .ok_or("no addresses")?;
-        let sc = channel_controller.new_subchannel(address);
-        self.subchannel = Some(sc.clone());
+            .addresses;
+
+        let address = addresses.pop().ok_or("no addresses")?;
+
+        let sc = channel_controller.new_subchannel(&address);
+        self.subchannels = vec![sc.clone()];
         sc.connect();
-        self.work_scheduler
-            .schedule_work(Box::new("call me maybe?"));
+
+        *self.next_addresses.lock().unwrap() = addresses;
+        let work_scheduler = self.work_scheduler.clone();
+        // TODO: Implement Drop that cancels this task.
+        tokio::task::spawn(async move {
+            sleep(Duration::from_millis(200)).await;
+            work_scheduler.schedule_work();
+        });
         // TODO: return a picker that queues RPCs.
         Ok(())
     }
@@ -69,26 +92,33 @@ impl LbPolicy for PickFirstPolicy {
     ) {
         dbg!();
 
-        let Some(sc) = self.subchannel.clone() else {
-            return;
-        };
-        if update
-            .get(&sc)
-            .is_none_or(|ss| ss.connectivity_state != ConnectivityState::Ready)
-        {
+        for sc in &self.subchannels {
             // Ignore updates for subchannels other than our subchannel, or if
             // the state is not Ready.
-            return;
+            if update
+                .get(sc)
+                .is_some_and(|ss| ss.connectivity_state == ConnectivityState::Ready)
+            {
+                channel_controller.update_picker(LbState {
+                    connectivity_state: ConnectivityState::Ready,
+                    picker: Box::new(OneSubchannelPicker { sc: sc.clone() }),
+                });
+                break;
+            }
         }
-
-        channel_controller.update_picker(LbState {
-            connectivity_state: ConnectivityState::Ready,
-            picker: Box::new(OneSubchannelPicker { sc }),
-        });
     }
 
-    fn work(&mut self, _: &mut dyn ChannelController, data: Box<dyn std::any::Any + Send + Sync>) {
-        println!("Called with {}", data.downcast_ref::<&str>().unwrap());
+    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
+        let mut work_items = self.next_addresses.lock().unwrap();
+
+        work_items
+            .iter()
+            .for_each(|v| println!("Called with {}", v));
+
+        if let Some(address) = work_items.pop() {
+            self.subchannels
+                .push(channel_controller.new_subchannel(&address));
+        }
     }
 }
 

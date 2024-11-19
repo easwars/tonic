@@ -2,7 +2,7 @@ use std::error::Error;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::vec;
+use std::{mem, vec};
 
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::AbortHandle;
@@ -16,11 +16,11 @@ use crate::rt;
 use crate::service::{Request, Response};
 
 use super::load_balancing::{
-    self, pick_first, ChannelController, LbPolicy, LbPolicyBuilder, LbPolicyOptions,
-    LbPolicyRegistry, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
+    self, pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, LbState,
+    Subchannel, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
-    self, Resolver, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
+    self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
     GLOBAL_RESOLVER_REGISTRY,
 };
 use super::service_config::ParsedServiceConfig;
@@ -201,7 +201,6 @@ struct ActiveChannel {
     cur_state: Mutex<ConnectivityState>,
     abort_handle: AbortHandle,
     subchannel_pool: Arc<InternalSubchannelPool>,
-    resolver: Box<dyn Resolver>,
 }
 
 impl ActiveChannel {
@@ -224,26 +223,21 @@ impl ActiveChannel {
             }
         });
 
-        let resolver_helper = Box::new(ResolverHelper::new(tx.clone()));
-        let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
-        let resolver = rb
-            .unwrap()
-            .build(target, resolve_now, ResolverOptions::default());
+        tokio::task::spawn(async move {
+            let resolver_helper = Box::new(tx.clone());
+            let rb = GLOBAL_RESOLVER_REGISTRY.get_scheme(target.scheme());
+            let mut resolver = rb
+                .unwrap()
+                .build(target, resolve_now, ResolverOptions::default());
 
-        let slf = Arc::new(Self {
+            resolver.start(resolver_helper).await;
+        });
+
+        Arc::new(Self {
             cur_state: Mutex::new(ConnectivityState::Connecting),
             abort_handle: jh.abort_handle(),
             subchannel_pool: scp,
-            resolver,
-        });
-
-        let slf2 = slf.clone();
-
-        tokio::task::spawn(async move {
-            slf2.resolver.start(resolver_helper).await;
-        });
-
-        slf
+        })
     }
 
     async fn call(&self, request: Request) -> Response {
@@ -258,6 +252,26 @@ impl ActiveChannel {
 impl Drop for ActiveChannel {
     fn drop(&mut self) {
         self.abort_handle.abort();
+    }
+}
+
+pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
+
+#[async_trait]
+impl name_resolution::ChannelController for WorkQueueTx {
+    fn parse_config(
+        &self,
+        config: &str,
+    ) -> Result<ParsedServiceConfig, Box<dyn Error + Send + Sync>> {
+        Ok(ParsedServiceConfig {})
+        // Needs to call gsb's policy builder
+    }
+    async fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (tx, rx) = oneshot::channel();
+        self.send(Box::new(|c: &mut InternalChannelController| {
+            let _ = tx.send(c.lb.clone().handle_resolver_update(state, c));
+        }))?;
+        rx.await?
     }
 }
 
@@ -285,11 +299,11 @@ impl InternalChannelController {
 }
 
 impl load_balancing::ChannelController for InternalChannelController {
-    fn new_subchannel(&mut self, address: &name_resolution::Address) -> load_balancing::Subchannel {
+    fn new_subchannel(&mut self, address: &Address) -> Subchannel {
         self.scp.new_subchannel(address)
     }
 
-    fn update_picker(&mut self, update: load_balancing::LbState) {
+    fn update_picker(&mut self, update: LbState) {
         self.scp.update_picker(update);
     }
 
@@ -300,22 +314,30 @@ impl load_balancing::ChannelController for InternalChannelController {
 
 // A channel that is not idle (connecting, ready, or erroring).
 pub(super) struct GracefulSwitchBalancer {
-    policy: Arc<Mutex<Option<Box<dyn LbPolicy>>>>,
+    policy: Mutex<Option<Box<dyn LbPolicy>>>,
     policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
     work_scheduler: WorkQueueTx,
+    pending: Mutex<bool>,
 }
 
-impl WorkScheduler for WorkQueueTx {
-    fn schedule_work(&self, data: Box<dyn std::any::Any + Send + Sync>) {
-        let _ = self.send(Box::new(|c: &mut InternalChannelController| {
-            c.lb.clone()
-                .policy
-                .lock()
-                .unwrap()
-                .as_mut()
-                .unwrap()
-                .work(c, data);
-        }));
+impl WorkScheduler for GracefulSwitchBalancer {
+    fn schedule_work(&self) {
+        if mem::replace(&mut *self.pending.lock().unwrap(), true) {
+            // Already had a pending call scheduled.
+            return;
+        }
+        let _ = self
+            .work_scheduler
+            .send(Box::new(|c: &mut InternalChannelController| {
+                *c.lb.pending.lock().unwrap() = false;
+                c.lb.clone()
+                    .policy
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .work(c);
+            }));
     }
 }
 
@@ -323,14 +345,16 @@ impl GracefulSwitchBalancer {
     fn new(work_scheduler: WorkQueueTx) -> Self {
         Self {
             policy_builder: Mutex::default(),
-            policy: Arc::new(Mutex::new(None::<Box<dyn LbPolicy>>)),
+            policy: Mutex::default(), // new(None::<Box<dyn LbPolicy>>),
             work_scheduler,
+            pending: Mutex::default(),
         }
     }
+
     fn handle_resolver_update(
-        &self,
+        self: &Arc<Self>,
         update: ResolverUpdate,
-        controller: &mut dyn ChannelController,
+        controller: &mut InternalChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         dbg!();
         let policy_name = pick_first::POLICY_NAME;
@@ -346,7 +370,7 @@ impl GracefulSwitchBalancer {
         if p.is_none() {
             let builder = GLOBAL_LB_REGISTRY.get_policy(policy_name).unwrap();
             let newpol = builder.build(LbPolicyOptions {
-                work_scheduler: Box::new(self.work_scheduler.clone()),
+                work_scheduler: self.clone(),
             });
             *self.policy_builder.lock().unwrap() = Some(builder);
             *p = Some(newpol);
@@ -370,7 +394,7 @@ impl GracefulSwitchBalancer {
     pub(super) fn subchannel_update(
         &self,
         update: SubchannelUpdate,
-        channel_controller: &mut dyn ChannelController,
+        channel_controller: &mut dyn load_balancing::ChannelController,
     ) {
         let mut p = self.policy.lock().unwrap();
 
@@ -381,36 +405,6 @@ impl GracefulSwitchBalancer {
 }
 
 pub(super) type WorkQueueItem = Box<dyn FnOnce(&mut InternalChannelController) + Send + Sync>;
-
-pub(super) type WorkQueueTx = mpsc::UnboundedSender<WorkQueueItem>;
-
-struct ResolverHelper {
-    tx: WorkQueueTx,
-}
-
-impl ResolverHelper {
-    fn new(tx: WorkQueueTx) -> Self {
-        Self { tx }
-    }
-}
-
-#[async_trait]
-impl name_resolution::ChannelController for ResolverHelper {
-    fn parse_config(
-        &self,
-        config: &str,
-    ) -> Result<ParsedServiceConfig, Box<dyn Error + Send + Sync>> {
-        Ok(ParsedServiceConfig {})
-        // Needs to call gsb's policy builder
-    }
-    async fn update(&self, state: ResolverUpdate) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(Box::new(|c: &mut InternalChannelController| {
-            let _ = tx.send(c.lb.clone().handle_resolver_update(state, c));
-        }))?;
-        rx.await?
-    }
-}
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum ConnectivityState {

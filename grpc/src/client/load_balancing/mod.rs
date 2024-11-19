@@ -24,7 +24,7 @@ mod registry;
 pub use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};
 
 pub struct LbPolicyOptions {
-    pub work_scheduler: Box<dyn WorkScheduler>,
+    pub work_scheduler: Arc<dyn WorkScheduler>,
 }
 
 /// An LB policy factory
@@ -39,7 +39,9 @@ pub trait LbPolicyBuilder: Send + Sync {
 }
 
 pub trait WorkScheduler: Send + Sync {
-    fn schedule_work(&self, data: Box<dyn Any + Send + Sync>);
+    // Schedules a call into the LbPolicy's work method.  If there is a pending
+    // work call that has not yet started, this may not schedule another call.
+    fn schedule_work(&self);
 }
 
 pub trait LbPolicy: Send + Sync {
@@ -54,11 +56,7 @@ pub trait LbPolicy: Send + Sync {
         update: &SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     );
-    fn work(
-        &mut self,
-        channel_controller: &mut dyn ChannelController,
-        data: Box<dyn Any + Send + Sync>,
-    );
+    fn work(&mut self, channel_controller: &mut dyn ChannelController);
 }
 
 pub struct SubchannelUpdate {

@@ -97,5 +97,5 @@ pub static TCP_IP_ADDRESS_TYPE: &str = "tcp";
 
 #[async_trait]
 pub trait Resolver: Send + Sync {
-    async fn start(&self, channel_controller: Box<dyn ChannelController>);
+    async fn start(&mut self, channel_controller: Box<dyn ChannelController>);
 }
