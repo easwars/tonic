@@ -1,12 +1,10 @@
 use std::{
     error::Error,
-    mem,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use tokio::time::sleep;
-use tonic::transport::channel;
 
 use crate::{
     client::{

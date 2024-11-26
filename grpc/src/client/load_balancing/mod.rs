@@ -204,7 +204,9 @@ pub trait ChannelControllerCallbacks: Send + Sync {
     fn new_subchannel(
         &mut self,
         address: &Address,
-        updates: Box<dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks)>,
+        updates: Box<
+            dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync,
+        >,
     ) -> Subchannel;
     fn update_picker(&mut self, update: LbState);
     fn request_resolution(&mut self);
