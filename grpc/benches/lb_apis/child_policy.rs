@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{borrow::BorrowMut, collections::HashMap};
 
 use grpc::client::{
     load_balancing::{
@@ -7,6 +7,8 @@ use grpc::client::{
     name_resolution::ResolverUpdate,
     ConnectivityState,
 };
+
+use crate::*;
 
 pub struct ChildPolicy {
     scs: HashMap<Subchannel, ConnectivityState>,
@@ -45,36 +47,14 @@ impl LbPolicy for ChildPolicy {
         //update: &grpc::client::load_balancing::SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     ) {
-        if !self.scs.contains_key(subchannel) {
+        let Some(e) = self.scs.get_mut(subchannel) else {
             return;
-        }
-        let mut connectivity_state = ConnectivityState::TransientFailure;
+        };
+        *e = state.connectivity_state;
 
-        for (subchan, con_state) in self.scs.iter_mut() {
-            if *subchan == *subchannel {
-                *con_state = state.connectivity_state;
-            };
-            if *con_state == ConnectivityState::Ready {
-                connectivity_state = ConnectivityState::Ready;
-            } else if *con_state == ConnectivityState::Connecting
-                && connectivity_state != ConnectivityState::Ready
-            {
-                connectivity_state = ConnectivityState::Connecting;
-            } else if *con_state == ConnectivityState::Idle
-                && connectivity_state != ConnectivityState::Connecting
-                && connectivity_state != ConnectivityState::Ready
-            {
-                connectivity_state = ConnectivityState::Idle;
-            } else if connectivity_state != ConnectivityState::Ready
-                && connectivity_state != ConnectivityState::Connecting
-                && connectivity_state != ConnectivityState::Idle
-            {
-                connectivity_state = ConnectivityState::TransientFailure;
-            }
-        }
         let picker = Box::new(DummyPicker {});
         channel_controller.update_picker(LbState {
-            connectivity_state,
+            connectivity_state: effective_state(&self.scs),
             picker,
         });
     }

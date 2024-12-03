@@ -1,6 +1,6 @@
 use bencher::{benchmark_group, benchmark_main, Bencher};
 use rand::prelude::*;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use grpc::client::{
     load_balancing::{
@@ -194,4 +194,29 @@ impl ChannelControllerCallbacks for StubChannelControllerCallbacks {
     fn request_resolution(&mut self) {
         // No resolver to notify.
     }
+}
+
+pub(crate) fn effective_state(m: &HashMap<Subchannel, ConnectivityState>) -> ConnectivityState {
+    let mut connectivity_state = ConnectivityState::TransientFailure;
+
+    for (_, con_state) in m.iter() {
+        if *con_state == ConnectivityState::Ready {
+            connectivity_state = ConnectivityState::Ready;
+        } else if *con_state == ConnectivityState::Connecting
+            && connectivity_state != ConnectivityState::Ready
+        {
+            connectivity_state = ConnectivityState::Connecting;
+        } else if *con_state == ConnectivityState::Idle
+            && connectivity_state != ConnectivityState::Connecting
+            && connectivity_state != ConnectivityState::Ready
+        {
+            connectivity_state = ConnectivityState::Idle;
+        } else if connectivity_state != ConnectivityState::Ready
+            && connectivity_state != ConnectivityState::Connecting
+            && connectivity_state != ConnectivityState::Idle
+        {
+            connectivity_state = ConnectivityState::TransientFailure;
+        }
+    }
+    connectivity_state
 }
