@@ -24,9 +24,9 @@ pub(crate) use child_policy::*;
 pub(crate) use del_pol_cb::*;
 pub(crate) use delegating_policy::*;
 
-static NUM_ENDPOINTS: i32 = 5;
-static NUM_ADDRS_PER_ENDPOINT: i32 = 3;
-static NUM_SUBCHANNELS_PER_UPDATE: i32 = 2;
+static NUM_ENDPOINTS: i32 = 10;
+static NUM_ADDRS_PER_ENDPOINT: i32 = 5;
+static NUM_SUBCHANNELS_PER_UPDATE: i32 = 50;
 
 fn broadcast(bench: &mut Bencher) {
     let mut lb = DelegatingPolicy::new();
