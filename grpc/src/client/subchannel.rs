@@ -156,7 +156,7 @@ impl Service for InternalSubchannel {
 
 pub(crate) struct InternalSubchannelPool {
     subchannels: Mutex<HashMap<Subchannel, Arc<InternalSubchannel>>>,
-    subchannel_update: Arc<Mutex<SubchannelUpdate>>,
+    //subchannel_update: Arc<Mutex<SubchannelUpdate>>,
     picker: Watcher<Box<dyn Picker>>,
     pub(crate) connectivity_state: Watcher<ConnectivityState>,
     wtx: WorkQueueTx,
@@ -166,7 +166,7 @@ impl InternalSubchannelPool {
     pub(crate) fn new(wtx: WorkQueueTx) -> Self {
         Self {
             subchannels: Mutex::default(),
-            subchannel_update: Arc::default(),
+            //subchannel_update: Arc::default(),
             picker: Watcher::new(),
             connectivity_state: Watcher::new(),
             wtx,
@@ -203,10 +203,11 @@ impl InternalSubchannelPool {
         let sc2 = sc.clone();
         let wtx = self.wtx.clone();
         let cs_update = move |st| {
-            let mut scu = SubchannelUpdate::new();
-            scu.set(&sc2, st);
-            let _ = wtx.send(Box::new(|c: &mut InternalChannelController| {
-                c.lb.clone().subchannel_update(scu, c);
+            //let mut scu = SubchannelUpdate::new();
+            //scu.set(&sc2, st);
+            let sc = sc2.clone();
+            let _ = wtx.send(Box::new(move |c: &mut InternalChannelController| {
+                c.lb.clone().subchannel_update(&sc, &st, c);
             }));
         };
         let isc = Arc::new(InternalSubchannel::new(

@@ -21,7 +21,7 @@ impl LbPolicy for DelegatingPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        _: Option<Box<dyn LbConfig>>,
+        _: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let ResolverUpdate::Data(rd) = update else {
@@ -41,12 +41,13 @@ impl LbPolicy for DelegatingPolicy {
 
     fn subchannel_update(
         &mut self,
-        update: &SubchannelUpdate,
+        subchannel: &Subchannel,
+        state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     ) {
         let mut wc = WrappedController { channel_controller };
         self.children.iter_mut().for_each(|child| {
-            child.as_mut().subchannel_update(update, &mut wc);
+            child.as_mut().subchannel_update(subchannel, state, &mut wc);
         });
     }
 

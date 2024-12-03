@@ -24,9 +24,9 @@ pub(crate) use child_policy::*;
 pub(crate) use del_pol_cb::*;
 pub(crate) use delegating_policy::*;
 
-static NUM_ENDPOINTS: i32 = 10;
-static NUM_ADDRS_PER_ENDPOINT: i32 = 5;
-static NUM_SUBCHANNELS_PER_UPDATE: i32 = 50;
+static NUM_ENDPOINTS: i32 = 1000;
+static NUM_ADDRS_PER_ENDPOINT: i32 = 1;
+static NUM_SUBCHANNELS_PER_UPDATE: i32 = 1;
 
 fn broadcast(bench: &mut Bencher) {
     let mut lb = DelegatingPolicy::new();
@@ -48,25 +48,25 @@ fn broadcast(bench: &mut Bencher) {
     let num_subchannels = channel_controller.subchannels.len();
 
     bench.iter(|| {
-        let mut update = SubchannelUpdate::new();
+        //let mut update = SubchannelUpdate::new();
         // Update random subchannels to a random state.
-        for _ in 0..NUM_SUBCHANNELS_PER_UPDATE {
-            let connectivity_state = thread_rng().gen_range(0..4);
-            let connectivity_state = match connectivity_state {
-                0 => ConnectivityState::Idle,
-                1 => ConnectivityState::Connecting,
-                2 => ConnectivityState::Ready,
-                _ => ConnectivityState::TransientFailure,
-            };
-            update.set(
-                &channel_controller.subchannels[thread_rng().gen_range(0..num_subchannels)],
-                SubchannelState {
-                    connectivity_state,
-                    last_connection_error: None,
-                },
-            );
-        }
-        lb.subchannel_update(&update, &mut channel_controller);
+        //for _ in 0..NUM_SUBCHANNELS_PER_UPDATE {
+        let connectivity_state = thread_rng().gen_range(0..4);
+        let connectivity_state = match connectivity_state {
+            0 => ConnectivityState::Idle,
+            1 => ConnectivityState::Connecting,
+            2 => ConnectivityState::Ready,
+            _ => ConnectivityState::TransientFailure,
+        };
+        let sc = channel_controller.subchannels[thread_rng().gen_range(0..num_subchannels)].clone();
+        lb.subchannel_update(
+            &sc,
+            &SubchannelState {
+                connectivity_state,
+                last_connection_error: None,
+            },
+            &mut channel_controller,
+        );
     });
 }
 

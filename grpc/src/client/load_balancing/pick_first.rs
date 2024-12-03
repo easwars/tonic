@@ -10,14 +10,14 @@ use crate::{
     client::{
         load_balancing::LbState,
         name_resolution::{Address, ResolverUpdate},
-        ConnectivityState,
+        subchannel, ConnectivityState,
     },
     service::Request,
 };
 
 use super::{
     ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, Picker,
-    Subchannel, WorkScheduler,
+    Subchannel, SubchannelState, WorkScheduler,
 };
 
 pub static POLICY_NAME: &str = "pick_first";
@@ -52,7 +52,7 @@ impl LbPolicy for PickFirstPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<Box<dyn LbConfig>>,
+        config: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let ResolverUpdate::Data(update) = update else {
@@ -85,7 +85,8 @@ impl LbPolicy for PickFirstPolicy {
 
     fn subchannel_update(
         &mut self,
-        update: &super::SubchannelUpdate,
+        subchannel: &Subchannel,
+        state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     ) {
         dbg!();
@@ -93,10 +94,7 @@ impl LbPolicy for PickFirstPolicy {
         for sc in &self.subchannels {
             // Ignore updates for subchannels other than our subchannel, or if
             // the state is not Ready.
-            if update
-                .get(sc)
-                .is_some_and(|ss| ss.connectivity_state == ConnectivityState::Ready)
-            {
+            if *sc == *subchannel && state.connectivity_state == ConnectivityState::Ready {
                 channel_controller.update_picker(LbState {
                     connectivity_state: ConnectivityState::Ready,
                     picker: Box::new(OneSubchannelPicker { sc: sc.clone() }),

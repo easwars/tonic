@@ -33,7 +33,7 @@ pub trait LbPolicyBuilder: Send + Sync {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<Box<dyn LbConfig>> {
+    fn parse_config(&self, config: &str) -> Option<&dyn LbConfig> {
         None
     }
 }
@@ -48,12 +48,13 @@ pub trait LbPolicy: Send + Sync {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<Box<dyn LbConfig>>,
+        config: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
     fn subchannel_update(
         &mut self,
-        update: &SubchannelUpdate,
+        update: &Subchannel,
+        state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     );
     fn work(&mut self, channel_controller: &mut dyn ChannelController);
@@ -71,7 +72,7 @@ pub struct SubchannelState {
     // Set if connectivity state is TransientFailure to describe the failure.
     pub last_connection_error: Option<Arc<dyn Error + Send + Sync>>,
 }
-
+/*
 impl SubchannelUpdate {
     pub fn new() -> Self {
         Self {
@@ -98,7 +99,7 @@ impl Default for SubchannelUpdate {
         }
     }
 }
-
+*/
 pub trait LbConfig: Send {
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }

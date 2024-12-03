@@ -17,7 +17,7 @@ use crate::service::{Request, Response};
 
 use super::load_balancing::{
     self, pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, LbState,
-    Subchannel, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
+    Subchannel, SubchannelState, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
     self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
@@ -377,13 +377,8 @@ impl GracefulSwitchBalancer {
         }
 
         // TODO: config should come from ParsedServiceConfig.
-        let config = self
-            .policy_builder
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .parse_config("");
+        let builder = self.policy_builder.lock().unwrap();
+        let config = builder.as_ref().unwrap().parse_config("");
 
         p.as_mut()
             .unwrap()
@@ -393,14 +388,15 @@ impl GracefulSwitchBalancer {
     }
     pub(super) fn subchannel_update(
         &self,
-        update: SubchannelUpdate,
+        subchannel: &Subchannel,
+        state: &SubchannelState,
         channel_controller: &mut dyn load_balancing::ChannelController,
     ) {
         let mut p = self.policy.lock().unwrap();
 
         p.as_mut()
             .unwrap()
-            .subchannel_update(&update, channel_controller);
+            .subchannel_update(subchannel, state, channel_controller);
     }
 }
 

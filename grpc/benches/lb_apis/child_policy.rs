@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use grpc::client::{
-    load_balancing::{ChannelController, LbPolicy, LbState, Picker, Subchannel},
+    load_balancing::{
+        ChannelController, LbConfig, LbPolicy, LbState, Picker, Subchannel, SubchannelState,
+    },
     name_resolution::ResolverUpdate,
     ConnectivityState,
 };
@@ -22,7 +24,7 @@ impl LbPolicy for ChildPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        _: Option<Box<dyn grpc::client::load_balancing::LbConfig>>,
+        _: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ResolverUpdate::Data(rd) = update else {
@@ -38,14 +40,19 @@ impl LbPolicy for ChildPolicy {
 
     fn subchannel_update(
         &mut self,
-        update: &grpc::client::load_balancing::SubchannelUpdate,
+        subchannel: &Subchannel,
+        state: &SubchannelState,
+        //update: &grpc::client::load_balancing::SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     ) {
+        if !self.scs.contains_key(subchannel) {
+            return;
+        }
         let mut connectivity_state = ConnectivityState::TransientFailure;
 
         for (subchan, con_state) in self.scs.iter_mut() {
-            if let Some(update) = update.get(subchan) {
-                *con_state = update.connectivity_state;
+            if *subchan == *subchannel {
+                *con_state = state.connectivity_state;
             };
             if *con_state == ConnectivityState::Ready {
                 connectivity_state = ConnectivityState::Ready;
