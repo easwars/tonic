@@ -37,12 +37,15 @@ impl LbPolicyCallbacks for ChildPolicyCallbacks {
             let scmap = self.scs.clone();
             let subchannel = channel_controller.new_subchannel(
                 &address,
-                Box::new(move |sc, scs, cc| {
+                Box::new(move |subchannel, state, channel_controller| {
                     let mut m = scmap.lock().unwrap();
-                    m.insert(sc, scs.connectivity_state);
-                    let picker = Box::new(DummyPicker {});
+                    let Some(e) = m.get_mut(&subchannel) else {
+                        return;
+                    };
+                    *e = state.connectivity_state;
 
-                    cc.update_picker(LbState {
+                    let picker = Box::new(DummyPicker {});
+                    channel_controller.update_picker(LbState {
                         connectivity_state: effective_state(&m),
                         picker,
                     });
