@@ -2,7 +2,8 @@ use std::{borrow::BorrowMut, collections::HashMap};
 
 use grpc::client::{
     load_balancing::{
-        ChannelController, LbConfig, LbPolicy, LbState, Picker, Subchannel, SubchannelState,
+        ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbState, Picker, Subchannel,
+        SubchannelState,
     },
     name_resolution::ResolverUpdate,
     ConnectivityState,
@@ -10,16 +11,21 @@ use grpc::client::{
 
 use crate::*;
 
-pub struct ChildPolicy {
-    scs: HashMap<Subchannel, ConnectivityState>,
+pub struct ChildPolicyBuilder {}
+
+impl LbPolicyBuilder for ChildPolicyBuilder {
+    fn build(&self, options: grpc::client::load_balancing::LbPolicyOptions) -> Box<dyn LbPolicy> {
+        Box::new(ChildPolicy::default())
+    }
+
+    fn name(&self) -> &'static str {
+        "child"
+    }
 }
 
-impl ChildPolicy {
-    pub fn new() -> Self {
-        Self {
-            scs: HashMap::default(),
-        }
-    }
+#[derive(Default)]
+struct ChildPolicy {
+    scs: HashMap<Subchannel, ConnectivityState>,
 }
 
 impl LbPolicy for ChildPolicy {

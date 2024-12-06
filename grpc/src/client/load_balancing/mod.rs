@@ -8,8 +8,8 @@ use std::{
         Arc,
     },
 };
-use tokio::sync::Notify;
-use tonic::metadata::MetadataMap;
+use tokio::sync::{mpsc::Sender, Notify};
+use tonic::{async_trait, metadata::MetadataMap};
 
 use crate::service::{Request, Response};
 
@@ -22,6 +22,25 @@ pub mod pick_first;
 
 mod registry;
 pub use registry::{LbPolicyRegistry, GLOBAL_LB_REGISTRY};
+
+pub trait LbPolicyBuilderV2 {
+    fn start(&self, cc: Sender<ChannelOperations>) -> Sender<ChannelUpdates>;
+}
+
+pub enum ChannelOperations {
+    CreateSubchannel(Address),
+    ConnectSubchannel(Address),
+    RemoveSubchannel(Address),
+    UpdatePicker(LbState),
+    RequestResolution,
+}
+
+pub enum ChannelUpdates {
+    NameResolverUpdate(ResolverUpdate),
+    SubchannelUpdate(Address, SubchannelState),
+}
+
+pub trait LbPolicyV2 {}
 
 pub struct LbPolicyOptions {
     pub work_scheduler: Arc<dyn WorkScheduler>,

@@ -1,6 +1,9 @@
+#![allow(unused_imports, dead_code)]
+
 use bencher::{benchmark_group, benchmark_main, Bencher};
 use rand::prelude::*;
 use std::{collections::HashMap, sync::Arc};
+use tokio::sync::mpsc::channel;
 
 use grpc::client::{
     load_balancing::{
@@ -29,7 +32,7 @@ static NUM_ADDRS_PER_ENDPOINT: i32 = 1;
 static NUM_SUBCHANNELS_PER_UPDATE: i32 = 1;
 
 fn broadcast(bench: &mut Bencher) {
-    let mut lb = DelegatingPolicy::new();
+    let mut lb = DelegatingPolicy::default();
 
     // Create the ResolverData containing many endpoints and addresses.
     let mut rd = ResolverData::default();
