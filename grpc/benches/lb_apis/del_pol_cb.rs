@@ -1,39 +1,99 @@
-use grpc::client::{
-    load_balancing::{ChannelControllerCallbacks, LbPolicyCallbacks},
-    name_resolution::{ResolverData, ResolverUpdate},
+use std::{
+    error::Error,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+};
+
+use grpc::{
+    client::{
+        load_balancing::{
+            ChannelControllerCallbacks, LbConfig, LbPolicyCallbacks, LbState, PickResult, Picker,
+            QueuingPicker,
+        },
+        name_resolution::{ResolverData, ResolverUpdate},
+    },
+    service::Request,
 };
 
 use crate::*;
 
 pub struct DelegatingPolicyCallbacks {
-    children: Vec<Box<dyn LbPolicyCallbacks>>,
+    children: Arc<Mutex<Vec<(Box<dyn LbPolicyCallbacks>, LbState)>>>,
 }
 
 impl DelegatingPolicyCallbacks {
     pub fn new() -> Self {
-        Self { children: vec![] }
+        Self {
+            children: Arc::default(),
+        }
+    }
+}
+
+fn update_picker(
+    children: Vec<(Box<dyn LbPolicyCallbacks>, LbState)>,
+    channel_controller: &mut dyn ChannelControllerCallbacks,
+) {
+    let connectivity_states = children
+        .iter()
+        .map(|(_, lbstate)| lbstate.connectivity_state);
+    let connectivity_state = effective_state(connectivity_states);
+    if connectivity_state == ConnectivityState::Ready
+        || connectivity_state == ConnectivityState::TransientFailure
+    {
+        let children = children
+            .iter()
+            .filter_map(|(_, lbstate)| {
+                if lbstate.connectivity_state == connectivity_state {
+                    return Some(lbstate.picker.clone());
+                }
+                None
+            })
+            .collect();
+        channel_controller.update_picker(LbState {
+            connectivity_state,
+            picker: Arc::new(RRPickerPicker::new(children)),
+        });
+    } else {
+        channel_controller.update_picker(LbState {
+            connectivity_state,
+            picker: Arc::new(QueuingPicker {}),
+        });
     }
 }
 
 impl LbPolicyCallbacks for DelegatingPolicyCallbacks {
     fn resolver_update(
         &mut self,
-        update: grpc::client::name_resolution::ResolverUpdate,
-        _: Option<Box<dyn grpc::client::load_balancing::LbConfig>>,
-        channel_controller: &mut dyn grpc::client::load_balancing::ChannelControllerCallbacks,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        update: ResolverUpdate,
+        _: Option<Box<dyn LbConfig>>,
+        channel_controller: &mut dyn ChannelControllerCallbacks,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let ResolverUpdate::Data(rd) = update else {
             return Err("bad update".into());
         };
-        self.children = vec![];
-        let mut wc = WrappedControllerCallbacks { channel_controller };
-        for endpoint in rd.endpoints {
-            let mut child = ChildPolicyCallbacks::new();
+        self.children = Arc::default();
+        for (idx, endpoint) in rd.endpoints.into_iter().enumerate() {
+            let child = ChildPolicyCallbacks::new();
+            self.children
+                .lock()
+                .unwrap()
+                .push((Box::new(child), LbState::initial()));
             let mut rd = ResolverData::default();
             rd.endpoints.push(endpoint);
-            let _ = child.resolver_update(ResolverUpdate::Data(rd), None, &mut wc);
-            self.children.push(Box::new(child));
+            let mut wc = WrappedControllerCallbacks {
+                channel_controller,
+                children: self.children.clone(),
+                idx,
+            };
+            let _ = self.children.lock().unwrap()[idx].0.resolver_update(
+                ResolverUpdate::Data(rd),
+                None,
+                &mut wc,
+            );
         }
+
         Ok(())
     }
 }
@@ -43,29 +103,61 @@ impl LbPolicyCallbacks for DelegatingPolicyCallbacks {
 // behavior injected.
 pub struct WrappedControllerCallbacks<'a> {
     channel_controller: &'a mut dyn ChannelControllerCallbacks,
+    children: Arc<Mutex<Vec<(Box<dyn LbPolicyCallbacks>, LbState)>>>,
+    idx: usize,
 }
 
 impl<'a> ChannelControllerCallbacks for WrappedControllerCallbacks<'a> {
     fn new_subchannel(
         &mut self,
-        address: &grpc::client::name_resolution::Address,
+        address: &Address,
         updates: Box<
-            dyn Fn(
-                    grpc::client::load_balancing::Subchannel,
-                    grpc::client::load_balancing::SubchannelState,
-                    &mut dyn ChannelControllerCallbacks,
-                ) + Send
-                + Sync,
+            dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync,
         >,
-    ) -> grpc::client::load_balancing::Subchannel {
-        self.channel_controller.new_subchannel(address, updates)
+    ) -> Subchannel {
+        let children = self.children.clone();
+        let idx = self.idx;
+        self.channel_controller.new_subchannel(
+            address,
+            Box::new(move |subchannel, subchannel_state, channel_controller| {
+                let mut wc = WrappedControllerCallbacks {
+                    channel_controller,
+                    children: children.clone(),
+                    idx,
+                };
+                updates(subchannel, subchannel_state, &mut wc);
+            }),
+        )
     }
 
-    fn update_picker(&mut self, update: grpc::client::load_balancing::LbState) {
-        self.channel_controller.update_picker(update);
+    fn update_picker(&mut self, update: LbState) {
+        let mut children = self.children.lock().unwrap();
+        let child = &mut children[self.idx];
+        child.1 = update;
+        update_picker(children, self.channel_controller)
     }
 
     fn request_resolution(&mut self) {
         self.channel_controller.request_resolution();
+    }
+}
+
+struct RRPickerPicker {
+    idx: AtomicUsize,
+    children: Vec<Arc<dyn Picker>>,
+}
+impl Picker for RRPickerPicker {
+    fn pick(&self, request: &Request) -> PickResult {
+        let idx = self.idx.fetch_add(1, Ordering::Relaxed);
+        self.children[idx % self.children.len()].pick(request)
+    }
+}
+
+impl RRPickerPicker {
+    fn new(children: Vec<Arc<dyn Picker>>) -> Self {
+        Self {
+            idx: AtomicUsize::new(0),
+            children,
+        }
     }
 }

@@ -3,6 +3,7 @@ use core::fmt;
 use std::{
     error::Error,
     fmt::{Display, Formatter},
+    hash::Hash,
     sync::Arc,
 };
 use tokio::sync::Notify;
@@ -69,7 +70,7 @@ pub struct ResolverData {
     pub attributes: Attributes,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Endpoint {
     pub addresses: Vec<Address>,
@@ -77,7 +78,21 @@ pub struct Endpoint {
     pub attributes: Attributes,
 }
 
-#[derive(Debug, Default)] // TODO: define manually to get type of addr
+impl Eq for Endpoint {}
+
+impl PartialEq for Endpoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.addresses == other.addresses
+    }
+}
+
+impl Hash for Endpoint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.addresses.hash(state);
+    }
+}
+
+#[derive(Debug, Default, Clone)] // TODO: define manually to get type of addr
 #[non_exhaustive]
 pub struct Address {
     // The address a string describing its type and a string.
@@ -85,6 +100,21 @@ pub struct Address {
     pub address: String,
     // Contains optional data which can be used by the Subchannel or transport.
     pub attributes: Attributes,
+}
+
+impl Eq for Address {}
+
+impl PartialEq for Address {
+    fn eq(&self, other: &Self) -> bool {
+        self.address_type == other.address_type && self.address == other.address
+    }
+}
+
+impl Hash for Address {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.address_type.hash(state);
+        self.address.hash(state);
+    }
 }
 
 impl Display for Address {

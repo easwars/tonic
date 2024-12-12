@@ -44,9 +44,9 @@ impl LbPolicyCallbacks for ChildPolicyCallbacks {
                     };
                     *e = state.connectivity_state;
 
-                    let picker = Box::new(DummyPicker {});
+                    let picker = Arc::new(DummyPicker {});
                     channel_controller.update_picker(LbState {
-                        connectivity_state: effective_state(&m),
+                        connectivity_state: effective_state(m.iter().map(|(_, v)| *v)),
                         picker,
                     });
                 }),

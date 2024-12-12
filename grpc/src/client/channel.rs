@@ -145,7 +145,7 @@ impl Channel {
             self.get_active_channel()
         };
         if let Some(s) = ac.subchannel_pool.connectivity_state.cur() {
-            return *s;
+            return s;
         }
         ConnectivityState::Idle
     }

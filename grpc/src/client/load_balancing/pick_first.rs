@@ -16,8 +16,8 @@ use crate::{
 };
 
 use super::{
-    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, Picker,
-    Subchannel, SubchannelState, WorkScheduler,
+    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, PickResult,
+    Picker, Subchannel, SubchannelState, WorkScheduler,
 };
 
 pub static POLICY_NAME: &str = "pick_first";
@@ -97,7 +97,7 @@ impl LbPolicy for PickFirstPolicy {
             if *sc == *subchannel && state.connectivity_state == ConnectivityState::Ready {
                 channel_controller.update_picker(LbState {
                     connectivity_state: ConnectivityState::Ready,
-                    picker: Box::new(OneSubchannelPicker { sc: sc.clone() }),
+                    picker: Arc::new(OneSubchannelPicker { sc: sc.clone() }),
                 });
                 break;
             }
@@ -123,8 +123,8 @@ struct OneSubchannelPicker {
 }
 
 impl Picker for OneSubchannelPicker {
-    fn pick(&self, request: &Request) -> Result<Pick, Box<dyn Error>> {
-        Ok(Pick {
+    fn pick(&self, request: &Request) -> PickResult {
+        PickResult::Subchannel(Pick {
             subchannel: self.sc.clone(),
             on_complete: None,
             metadata: None,

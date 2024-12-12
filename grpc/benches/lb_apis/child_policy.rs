@@ -1,12 +1,15 @@
 use std::{borrow::BorrowMut, collections::HashMap};
 
-use grpc::client::{
-    load_balancing::{
-        ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbState, Picker, Subchannel,
-        SubchannelState,
+use grpc::{
+    client::{
+        load_balancing::{
+            ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbState, PickResult, Picker,
+            Subchannel, SubchannelState,
+        },
+        name_resolution::ResolverUpdate,
+        ConnectivityState,
     },
-    name_resolution::ResolverUpdate,
-    ConnectivityState,
+    service::Request,
 };
 
 use crate::*;
@@ -14,7 +17,7 @@ use crate::*;
 pub struct ChildPolicyBuilder {}
 
 impl LbPolicyBuilder for ChildPolicyBuilder {
-    fn build(&self, options: grpc::client::load_balancing::LbPolicyOptions) -> Box<dyn LbPolicy> {
+    fn build(&self, _options: grpc::client::load_balancing::LbPolicyOptions) -> Box<dyn LbPolicy> {
         Box::new(ChildPolicy::default())
     }
 
@@ -50,7 +53,6 @@ impl LbPolicy for ChildPolicy {
         &mut self,
         subchannel: &Subchannel,
         state: &SubchannelState,
-        //update: &grpc::client::load_balancing::SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     ) {
         let Some(e) = self.scs.get_mut(subchannel) else {
@@ -58,9 +60,9 @@ impl LbPolicy for ChildPolicy {
         };
         *e = state.connectivity_state;
 
-        let picker = Box::new(DummyPicker {});
+        let picker = Arc::new(DummyPicker {});
         channel_controller.update_picker(LbState {
-            connectivity_state: effective_state(&self.scs),
+            connectivity_state: effective_state(self.scs.iter().map(|(_, v)| *v)),
             picker,
         });
     }
@@ -72,10 +74,7 @@ impl LbPolicy for ChildPolicy {
 
 pub struct DummyPicker {}
 impl Picker for DummyPicker {
-    fn pick(
-        &self,
-        _: &grpc::service::Request,
-    ) -> Result<grpc::client::load_balancing::Pick, Box<dyn std::error::Error>> {
-        Err("not valid".into())
+    fn pick(&self, _: &Request) -> PickResult {
+        PickResult::Err("not valid".into())
     }
 }

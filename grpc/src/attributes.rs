@@ -1,7 +1,7 @@
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct TODO;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Attributes {
     items: TODO,
 }

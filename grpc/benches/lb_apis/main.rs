@@ -32,7 +32,7 @@ static NUM_ADDRS_PER_ENDPOINT: i32 = 1;
 static NUM_SUBCHANNELS_PER_UPDATE: i32 = 1;
 
 fn broadcast(bench: &mut Bencher) {
-    let mut lb = DelegatingPolicy::default();
+    let mut lb = DelegatingPolicy::new();
 
     // Create the ResolverData containing many endpoints and addresses.
     let mut rd = ResolverData::default();
@@ -199,17 +199,17 @@ impl ChannelControllerCallbacks for StubChannelControllerCallbacks {
     }
 }
 
-pub(crate) fn effective_state(m: &HashMap<Subchannel, ConnectivityState>) -> ConnectivityState {
+pub(crate) fn effective_state(m: impl Iterator<Item = ConnectivityState>) -> ConnectivityState {
     let mut connectivity_state = ConnectivityState::TransientFailure;
 
-    for (_, con_state) in m.iter() {
-        if *con_state == ConnectivityState::Ready {
+    for con_state in m {
+        if con_state == ConnectivityState::Ready {
             connectivity_state = ConnectivityState::Ready;
-        } else if *con_state == ConnectivityState::Connecting
+        } else if con_state == ConnectivityState::Connecting
             && connectivity_state != ConnectivityState::Ready
         {
             connectivity_state = ConnectivityState::Connecting;
-        } else if *con_state == ConnectivityState::Idle
+        } else if con_state == ConnectivityState::Idle
             && connectivity_state != ConnectivityState::Connecting
             && connectivity_state != ConnectivityState::Ready
         {

@@ -157,7 +157,7 @@ impl Service for InternalSubchannel {
 pub(crate) struct InternalSubchannelPool {
     subchannels: Mutex<HashMap<Subchannel, Arc<InternalSubchannel>>>,
     //subchannel_update: Arc<Mutex<SubchannelUpdate>>,
-    picker: Watcher<Box<dyn Picker>>,
+    picker: Watcher<Arc<dyn Picker>>,
     pub(crate) connectivity_state: Watcher<ConnectivityState>,
     wtx: WorkQueueTx,
 }
@@ -178,7 +178,7 @@ impl InternalSubchannelPool {
             if let Some(p) = i.next().await {
                 let sc = &p
                     .pick(&request)
-                    .expect("TODO: handle picker errors (queue or fail RPC)")
+                    .unwrap_pick() // TODO: handle picker errors (queue or fail RPC)
                     .subchannel;
                 let scs = self.subchannels.lock().unwrap();
                 let sc = scs.get(sc).expect("Illegal Subchannel in pick");
@@ -236,11 +236,11 @@ impl InternalSubchannelPool {
 // Producer calls update.  Consumers call iter() and call next() until they find
 // a good value or encounter None.
 pub(crate) struct Watcher<T> {
-    tx: watch::Sender<Option<Arc<T>>>,
-    rx: watch::Receiver<Option<Arc<T>>>,
+    tx: watch::Sender<Option<T>>,
+    rx: watch::Receiver<Option<T>>,
 }
 
-impl<T> Watcher<T> {
+impl<T: Clone> Watcher<T> {
     fn new() -> Self {
         let (tx, rx) = watch::channel(None);
         Self { tx, rx }
@@ -252,7 +252,7 @@ impl<T> Watcher<T> {
         WatcherIter { rx }
     }
 
-    pub(crate) fn cur(&self) -> Option<Arc<T>> {
+    pub(crate) fn cur(&self) -> Option<T> {
         let mut rx = self.rx.clone();
         rx.mark_changed();
         let c = rx.borrow();
@@ -260,20 +260,20 @@ impl<T> Watcher<T> {
     }
 
     fn update(&self, item: T) {
-        self.tx.send(Some(Arc::new(item))).unwrap();
+        self.tx.send(Some(item)).unwrap();
     }
 }
 
 pub(crate) struct WatcherIter<T> {
-    rx: watch::Receiver<Option<Arc<T>>>,
+    rx: watch::Receiver<Option<T>>,
 }
 // TODO: Use an arc_swap::ArcSwap instead that contains T and a channel closed
 // when T is updated.  Even if the channel needs a lock, the fast path becomes
 // lock-free.
 
-impl<T> WatcherIter<T> {
+impl<T: Clone> WatcherIter<T> {
     /// Returns the next unseen value
-    pub(crate) async fn next(&mut self) -> Option<Arc<T>> {
+    pub(crate) async fn next(&mut self) -> Option<T> {
         loop {
             self.rx.changed().await.ok()?;
             let x = self.rx.borrow_and_update();

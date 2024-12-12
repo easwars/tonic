@@ -1,25 +1,85 @@
-use std::{collections::HashSet, error::Error, ops::DerefMut};
+use std::{
+    borrow::BorrowMut,
+    cell::{RefCell, RefMut},
+    collections::HashSet,
+    error::Error,
+    hash::Hash,
+    marker::PhantomData,
+    mem,
+    ops::DerefMut,
+    rc::Rc,
+    sync::atomic::{AtomicU32, AtomicUsize},
+};
 
 use grpc::client::{
     load_balancing::{
-        ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
-        SubchannelUpdate, WorkScheduler,
+        child_manager::{ChildManager, ChildUpdate},
+        ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState, Pick,
+        PickResult, Picker, QueuingPicker, SubchannelUpdate, WorkScheduler,
     },
     name_resolution::{Address, ResolverData, ResolverUpdate},
 };
 
 use crate::*;
 
-#[derive(Default)]
 pub struct DelegatingPolicy {
-    child_manager: ChildManager,
-    children: Vec<WrappedChild>,
-    //work_scheduler: Arc<dyn WorkScheduler>,
+    child_manager: ChildManager<Endpoint>,
 }
 
-pub struct NopWorkScheduler {}
-impl WorkScheduler for NopWorkScheduler {
-    fn schedule_work(&self) { /* do nothing */
+impl DelegatingPolicy {
+    pub fn new() -> Self {
+        Self {
+            child_manager: ChildManager::<Endpoint>::new(Box::new(|resolver_update| {
+                let ResolverUpdate::Data(rd) = resolver_update else {
+                    return Err("bad update".into());
+                };
+                let mut v = vec![];
+                for endpoint in rd.endpoints {
+                    let child_policy_builder: Box<dyn LbPolicyBuilder> =
+                        Box::new(ChildPolicyBuilder {});
+                    let mut rd = ResolverData::default();
+                    rd.endpoints.push(endpoint.clone());
+                    let child_update = ResolverUpdate::Data(rd);
+                    v.push(ChildUpdate {
+                        child_identifier: endpoint,
+                        child_policy_builder,
+                        child_update,
+                    });
+                }
+                Ok(Box::new(v.into_iter()))
+            })),
+        }
+    }
+
+    fn update_picker(&mut self, channel_controller: &mut dyn ChannelController) {
+        let connectivity_states = self
+            .child_manager
+            .child_states()
+            .map(|(_, lbstate)| lbstate.connectivity_state);
+        let connectivity_state = effective_state(connectivity_states);
+        if connectivity_state == ConnectivityState::Ready
+            || connectivity_state == ConnectivityState::TransientFailure
+        {
+            let children = self
+                .child_manager
+                .child_states()
+                .filter_map(|(_, lbstate)| {
+                    if lbstate.connectivity_state == connectivity_state {
+                        return Some(lbstate.picker.clone());
+                    }
+                    None
+                })
+                .collect();
+            channel_controller.update_picker(LbState {
+                connectivity_state,
+                picker: Arc::new(RRPickerPicker::new(children)),
+            });
+        } else {
+            channel_controller.update_picker(LbState {
+                connectivity_state,
+                picker: Arc::new(QueuingPicker {}),
+            });
+        }
     }
 }
 
@@ -27,22 +87,13 @@ impl LbPolicy for DelegatingPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        _: Option<&dyn LbConfig>,
+        config: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let ResolverUpdate::Data(rd) = update else {
-            return Err("bad update".into());
-        };
-        self.children = vec![];
-        for endpoint in rd.endpoints {
-            let mut child = self
-                .child_manager
-                .new_child(ChildPolicyBuilder {}, Arc::new(NopWorkScheduler {}));
-            let mut rd = ResolverData::default();
-            rd.endpoints.push(endpoint);
-            let _ = child.resolver_update(ResolverUpdate::Data(rd), None, channel_controller);
-            self.children.push(child);
-        }
+        let _ = self
+            .child_manager
+            .resolver_update(update, config, channel_controller)?;
+        self.update_picker(channel_controller);
         Ok(())
     }
 
@@ -54,93 +105,37 @@ impl LbPolicy for DelegatingPolicy {
     ) {
         self.child_manager
             .subchannel_update(subchannel, state, channel_controller);
+        self.update_picker(channel_controller);
     }
 
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {
         self.child_manager.work(channel_controller);
+        self.update_picker(channel_controller);
     }
 }
 
-#[derive(Default)]
-pub struct ChildManager {
-    subchannel_child_map: HashMap<Subchannel, WrappedChild>,
-    // todo: track work requests
-    children: HashSet<WrappedChild>,
-}
-
-// ChildManager implements LbPolicy forwarding
-impl ChildManager {
-    fn new_child(
-        &mut self,
-        child_builder: impl LbPolicyBuilder,
-        work_scheduler: Arc<dyn WorkScheduler>,
-    ) -> WrappedChild {
-        let child = child_builder.build(LbPolicyOptions { work_scheduler });
-        WrappedChild { child }
-    }
-    fn subchannel_update(
-        &mut self,
-        subchannel: &Subchannel,
-        state: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    ) {
-        let c = self.subchannel_child_map.get_mut(subchannel).unwrap();
-        c.subchannel_update(subchannel, state, channel_controller);
-    }
-
-    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
-        // find proper WrappedChild(ren) that requested work.
-        let (_, c) = self.subchannel_child_map.iter_mut().next().unwrap();
-        c.work(channel_controller);
+pub struct NopWorkScheduler {}
+impl WorkScheduler for NopWorkScheduler {
+    fn schedule_work(&self) { /* do nothing */
     }
 }
 
-pub struct WrappedChild {
-    child: Box<dyn LbPolicy>,
+struct RRPickerPicker {
+    idx: AtomicUsize,
+    children: Vec<Arc<dyn Picker>>,
 }
-
-impl LbPolicy for WrappedChild {
-    fn resolver_update(
-        &mut self,
-        update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
-        channel_controller: &mut dyn ChannelController,
-    ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut wc = WrappedController { channel_controller };
-        self.child.resolver_update(update, config, &mut wc)
-    }
-
-    fn subchannel_update(
-        &mut self,
-        update: &Subchannel,
-        state: &SubchannelState,
-        channel_controller: &mut dyn ChannelController,
-    ) {
-        let mut wc = WrappedController { channel_controller };
-        self.child.subchannel_update(update, state, &mut wc);
-    }
-
-    fn work(&mut self, channel_controller: &mut dyn ChannelController) {
-        let mut wc = WrappedController { channel_controller };
-        self.child.work(&mut wc);
+impl Picker for RRPickerPicker {
+    fn pick(&self, request: &grpc::service::Request) -> grpc::client::load_balancing::PickResult {
+        let idx = self.idx.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.children[idx % self.children.len()].pick(request)
     }
 }
 
-pub struct WrappedController<'a> {
-    channel_controller: &'a mut dyn ChannelController,
-}
-
-impl<'a> ChannelController for WrappedController<'a> {
-    fn new_subchannel(&mut self, address: &Address) -> Subchannel {
-        self.channel_controller.new_subchannel(address)
-        // TODO: add entry into subchannel->child map.
-    }
-
-    fn update_picker(&mut self, update: LbState) {
-        self.channel_controller.update_picker(update);
-    }
-
-    fn request_resolution(&mut self) {
-        self.channel_controller.request_resolution();
+impl RRPickerPicker {
+    fn new(children: Vec<Arc<dyn Picker>>) -> Self {
+        Self {
+            idx: AtomicUsize::new(0),
+            children,
+        }
     }
 }

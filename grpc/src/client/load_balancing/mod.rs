@@ -2,6 +2,7 @@ use std::{
     any::Any,
     collections::HashMap,
     error::Error,
+    fmt::Display,
     hash::Hash,
     sync::{
         atomic::{AtomicU32, Ordering::Relaxed},
@@ -18,6 +19,7 @@ use super::{
     ConnectivityState,
 };
 
+pub mod child_manager;
 pub mod pick_first;
 
 mod registry;
@@ -58,12 +60,13 @@ pub trait LbPolicyBuilder: Send + Sync {
 }
 
 pub trait WorkScheduler: Send + Sync {
-    // Schedules a call into the LbPolicy's work method.  If there is a pending
-    // work call that has not yet started, this may not schedule another call.
+    // Schedules a call into the LbPolicy's work method.  If there is already a
+    // pending work call that has not yet started, this may not schedule another
+    // call.
     fn schedule_work(&self);
 }
 
-pub trait LbPolicy: Send + Sync {
+pub trait LbPolicy: Send {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
@@ -124,13 +127,39 @@ pub trait LbConfig: Send {
 }
 
 pub trait Picker: Send + Sync {
-    fn pick(&self, request: &Request) -> Result<Pick, Box<dyn Error>>;
+    fn pick(&self, request: &Request) -> PickResult;
+}
+
+pub enum PickResult {
+    Subchannel(Pick),
+    Queue,
+    Err(Box<dyn Error + Send + Sync>),
+}
+
+impl PickResult {
+    pub fn unwrap_pick(self) -> Pick {
+        let PickResult::Subchannel(pick) = self else {
+            panic!("Called `PickResult::unwrap_pick` on a `Queue` or `Err` value");
+        };
+        pick
+    }
 }
 
 /// Data provided by the LB policy.
 pub struct LbState {
     pub connectivity_state: super::ConnectivityState,
-    pub picker: Box<dyn Picker>,
+    pub picker: Arc<dyn Picker>,
+}
+
+impl LbState {
+    // Returns an generic initial state which is Connecting and a picker which
+    // queues all picks.
+    pub fn initial() -> Self {
+        Self {
+            connectivity_state: ConnectivityState::Connecting,
+            picker: Arc::new(QueuingPicker {}),
+        }
+    }
 }
 
 pub struct Pick {
@@ -163,10 +192,16 @@ pub trait ChannelController: Send + Sync {
 ///
 /// When a Subchannel is dropped, it is disconnected automatically, and no
 /// subsequent state updates will be provided for it to the LB policy.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Subchannel {
     id: u32,
     notify: Arc<Notify>,
+}
+
+impl Display for Subchannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Subchannel {}", self.id)
+    }
 }
 
 static NEXT_SUBCHANNEL_ID: AtomicU32 = AtomicU32::new(0);
@@ -230,4 +265,12 @@ pub trait ChannelControllerCallbacks: Send + Sync {
     ) -> Subchannel;
     fn update_picker(&mut self, update: LbState);
     fn request_resolution(&mut self);
+}
+
+pub struct QueuingPicker {}
+
+impl Picker for QueuingPicker {
+    fn pick(&self, request: &Request) -> PickResult {
+        PickResult::Queue
+    }
 }
