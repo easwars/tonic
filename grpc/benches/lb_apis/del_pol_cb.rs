@@ -9,8 +9,9 @@ use std::{
 use grpc::{
     client::{
         load_balancing::{
-            ChannelControllerCallbacks, LbConfig, LbPolicyCallbacks, LbState, PickResult, Picker,
-            QueuingPicker,
+            child_manager_cb::{ChildManagerCallbacks, ChildUpdate},
+            ChannelControllerCallbacks, LbConfig, LbPolicyBuilderCallbacks, LbPolicyCallbacks,
+            LbState, PickResult, Picker, QueuingPicker,
         },
         name_resolution::{ResolverData, ResolverUpdate},
     },
@@ -20,46 +21,63 @@ use grpc::{
 use crate::*;
 
 pub struct DelegatingPolicyCallbacks {
-    children: Arc<Mutex<Vec<(Box<dyn LbPolicyCallbacks>, LbState)>>>,
+    child_manager: ChildManagerCallbacks<Endpoint>,
 }
 
 impl DelegatingPolicyCallbacks {
     pub fn new() -> Self {
         Self {
-            children: Arc::default(),
+            child_manager: ChildManagerCallbacks::<Endpoint>::new(Box::new(|resolver_update| {
+                let ResolverUpdate::Data(rd) = resolver_update else {
+                    return Err("bad update".into());
+                };
+                let mut v = vec![];
+                for endpoint in rd.endpoints {
+                    let child_policy_builder: Box<dyn LbPolicyBuilderCallbacks> =
+                        Box::new(ChildPolicyBuilderCallbacks {});
+                    let mut rd = ResolverData::default();
+                    rd.endpoints.push(endpoint.clone());
+                    let child_update = ResolverUpdate::Data(rd);
+                    v.push(ChildUpdate {
+                        child_identifier: endpoint,
+                        child_policy_builder,
+                        child_update,
+                    });
+                }
+                Ok(Box::new(v.into_iter()))
+            })),
         }
     }
-}
 
-fn update_picker(
-    children: Vec<(Box<dyn LbPolicyCallbacks>, LbState)>,
-    channel_controller: &mut dyn ChannelControllerCallbacks,
-) {
-    let connectivity_states = children
-        .iter()
-        .map(|(_, lbstate)| lbstate.connectivity_state);
-    let connectivity_state = effective_state(connectivity_states);
-    if connectivity_state == ConnectivityState::Ready
-        || connectivity_state == ConnectivityState::TransientFailure
-    {
-        let children = children
-            .iter()
-            .filter_map(|(_, lbstate)| {
-                if lbstate.connectivity_state == connectivity_state {
-                    return Some(lbstate.picker.clone());
-                }
-                None
-            })
-            .collect();
-        channel_controller.update_picker(LbState {
-            connectivity_state,
-            picker: Arc::new(RRPickerPicker::new(children)),
-        });
-    } else {
-        channel_controller.update_picker(LbState {
-            connectivity_state,
-            picker: Arc::new(QueuingPicker {}),
-        });
+    fn update_picker(&mut self, channel_controller: &mut dyn ChannelControllerCallbacks) {
+        let connectivity_states = self
+            .child_manager
+            .child_states()
+            .map(|(_, lbstate)| lbstate.connectivity_state);
+        let connectivity_state = effective_state(connectivity_states);
+        if connectivity_state == ConnectivityState::Ready
+            || connectivity_state == ConnectivityState::TransientFailure
+        {
+            let children = self
+                .child_manager
+                .child_states()
+                .filter_map(|(_, lbstate)| {
+                    if lbstate.connectivity_state == connectivity_state {
+                        return Some(lbstate.picker.clone());
+                    }
+                    None
+                })
+                .collect();
+            channel_controller.update_picker(LbState {
+                connectivity_state,
+                picker: Arc::new(RRPickerPicker::new(children)),
+            });
+        } else {
+            channel_controller.update_picker(LbState {
+                connectivity_state,
+                picker: Arc::new(QueuingPicker {}),
+            });
+        }
     }
 }
 
@@ -67,33 +85,13 @@ impl LbPolicyCallbacks for DelegatingPolicyCallbacks {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        _: Option<Box<dyn LbConfig>>,
+        config: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelControllerCallbacks,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let ResolverUpdate::Data(rd) = update else {
-            return Err("bad update".into());
-        };
-        self.children = Arc::default();
-        for (idx, endpoint) in rd.endpoints.into_iter().enumerate() {
-            let child = ChildPolicyCallbacks::new();
-            self.children
-                .lock()
-                .unwrap()
-                .push((Box::new(child), LbState::initial()));
-            let mut rd = ResolverData::default();
-            rd.endpoints.push(endpoint);
-            let mut wc = WrappedControllerCallbacks {
-                channel_controller,
-                children: self.children.clone(),
-                idx,
-            };
-            let _ = self.children.lock().unwrap()[idx].0.resolver_update(
-                ResolverUpdate::Data(rd),
-                None,
-                &mut wc,
-            );
-        }
-
+        let _ = self
+            .child_manager
+            .resolver_update(update, config, channel_controller)?;
+        self.update_picker(channel_controller);
         Ok(())
     }
 }
@@ -134,7 +132,7 @@ impl<'a> ChannelControllerCallbacks for WrappedControllerCallbacks<'a> {
         let mut children = self.children.lock().unwrap();
         let child = &mut children[self.idx];
         child.1 = update;
-        update_picker(children, self.channel_controller)
+        //update_picker(children, self.channel_controller)
     }
 
     fn request_resolution(&mut self) {

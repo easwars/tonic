@@ -20,6 +20,7 @@ use super::{
 };
 
 pub mod child_manager;
+pub mod child_manager_cb;
 pub mod pick_first;
 
 mod registry;
@@ -235,7 +236,7 @@ impl PartialEq for Subchannel {
 
 impl Eq for Subchannel {}
 
-pub trait LbPolicyBuilderCallbacks: Send + Sync {
+pub trait LbPolicyBuilderCallbacks: Send {
     /// Builds an LB policy instance, or returns an error.
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicyCallbacks>;
     /// Reports the name of the LB Policy.
@@ -245,24 +246,22 @@ pub trait LbPolicyBuilderCallbacks: Send + Sync {
     }
 }
 
-pub trait LbPolicyCallbacks: Send + Sync {
+pub trait LbPolicyCallbacks: Send {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<Box<dyn LbConfig>>,
+        config: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelControllerCallbacks,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
-pub trait ChannelControllerCallbacks: Send + Sync {
+type SubchannelUpdateFn<'a> = Box<
+    dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync + 'a,
+>;
+
+pub trait ChannelControllerCallbacks: Send {
     /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(
-        &mut self,
-        address: &Address,
-        updates: Box<
-            dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync,
-        >,
-    ) -> Subchannel;
+    fn new_subchannel(&mut self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel;
     fn update_picker(&mut self, update: LbState);
     fn request_resolution(&mut self);
 }

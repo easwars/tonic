@@ -18,7 +18,7 @@ use super::{Subchannel, SubchannelState};
 // An LbPolicy implementation that manages multiple children.
 pub struct ChildManager<T> {
     subchannel_child_map: HashMap<Subchannel, usize>,
-    // This needs to be Send + Sync!
+    // This needs to be Send + Sync, so Arc<Mutex<>> I guess!
     children_requesting_work: HashSet<usize>,
     children: Vec<Child<T>>,
     shard_update: Box<ResolverUpdateSharder<T>>,
@@ -206,9 +206,9 @@ impl<'a> WrappedController<'a> {
 
 impl<'a> ChannelController for WrappedController<'a> {
     fn new_subchannel(&mut self, address: &Address) -> Subchannel {
-        let sc = self.channel_controller.new_subchannel(address);
-        self.created_subchannels.push(sc.clone());
-        sc
+        let subchannel = self.channel_controller.new_subchannel(address);
+        self.created_subchannels.push(subchannel.clone());
+        subchannel
     }
 
     fn update_picker(&mut self, update: LbState) {

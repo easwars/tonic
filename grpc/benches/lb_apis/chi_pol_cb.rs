@@ -4,22 +4,29 @@ use std::{
 };
 
 use grpc::client::{
-    load_balancing::{LbPolicyCallbacks, LbState, Subchannel},
+    load_balancing::{
+        LbConfig, LbPolicyBuilderCallbacks, LbPolicyCallbacks, LbPolicyOptions, LbState, Subchannel,
+    },
     name_resolution::ResolverUpdate,
     ConnectivityState,
 };
 
 use crate::*;
 
+#[derive(Default)]
 pub struct ChildPolicyCallbacks {
     scs: Arc<Mutex<HashMap<Subchannel, ConnectivityState>>>,
 }
 
-impl ChildPolicyCallbacks {
-    pub fn new() -> Self {
-        Self {
-            scs: Arc::default(),
-        }
+pub struct ChildPolicyBuilderCallbacks {}
+
+impl LbPolicyBuilderCallbacks for ChildPolicyBuilderCallbacks {
+    fn build(&self, _options: LbPolicyOptions) -> Box<dyn LbPolicyCallbacks> {
+        Box::new(ChildPolicyCallbacks::default())
+    }
+
+    fn name(&self) -> &'static str {
+        "child"
     }
 }
 
@@ -27,8 +34,8 @@ impl LbPolicyCallbacks for ChildPolicyCallbacks {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        _: Option<Box<dyn grpc::client::load_balancing::LbConfig>>,
-        channel_controller: &mut dyn grpc::client::load_balancing::ChannelControllerCallbacks,
+        _: Option<&dyn LbConfig>,
+        channel_controller: &mut dyn ChannelControllerCallbacks,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ResolverUpdate::Data(rd) = update else {
             return Err("bad update".into());
