@@ -56,13 +56,6 @@ fn update_picker(
     channel_controller: &mut dyn ChannelControllerCallbacks,
 ) {
     let child_states = child_manager.child_states();
-    /*println!(
-        "updating picker: {:?}",
-        child_states
-            .iter()
-            .map(|v| v.1.connectivity_state)
-            .collect::<Vec<_>>()
-    );*/
     let connectivity_states = child_states
         .iter()
         .map(|(_, lbstate)| lbstate.connectivity_state);
@@ -70,12 +63,11 @@ fn update_picker(
     if connectivity_state == ConnectivityState::Ready
         || connectivity_state == ConnectivityState::TransientFailure
     {
-        //println!("{:?} - complex picker", connectivity_state);
         let children = child_states
-            .iter()
+            .into_iter()
             .filter_map(|(_, lbstate)| {
                 if lbstate.connectivity_state == connectivity_state {
-                    return Some(lbstate.picker.clone());
+                    return Some(lbstate.picker);
                 }
                 None
             })
@@ -126,10 +118,6 @@ impl<'a> ChannelControllerCallbacks for WrappedControllerCallbacks<'a> {
         self.channel_controller.new_subchannel(
             address,
             Box::new(move |subchannel, subchannel_state, channel_controller| {
-                /*println!(
-                    "got wrapped sc update in del policy: {:?}",
-                    subchannel_state.connectivity_state
-                );*/
                 let mut wc: WrappedControllerCallbacks = WrappedControllerCallbacks {
                     channel_controller,
                     child_manager: parent.clone(),

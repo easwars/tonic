@@ -39,17 +39,6 @@ impl<T: Clone> Inner<T> {
         channel_controller: WrappedControllerCallbacks<T>,
         child_idx: usize,
     ) {
-        /*println!(
-            "resolving child controller: {:?}, {:?}",
-            channel_controller.created_subchannels.len(),
-            channel_controller
-                .picker_update
-                .clone()
-                .map_or("none".to_string(), |s| format!(
-                    "{:?}",
-                    s.connectivity_state
-                ))
-        );*/
         for csc in channel_controller.created_subchannels {
             self.subchannel_child_map.insert(csc, child_idx);
         }
@@ -99,7 +88,7 @@ impl<T: Clone + PartialEq + Hash + Eq> ChildManagerCallbacks<T> {
             .children
             .iter()
             .map(|child| (child.identifier.clone(), child.state.clone()))
-            .collect::<Vec<_>>()
+            .collect()
     }
 }
 
