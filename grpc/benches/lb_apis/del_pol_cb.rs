@@ -6,12 +6,14 @@ use std::{
     },
 };
 
+use chi_pol_cb::ChildPolicyBuilder;
 use grpc::{
     client::{
         load_balancing::{
-            child_manager_cb::{ChildManagerCallbacks, ChildUpdate},
-            ChannelControllerCallbacks, LbConfig, LbPolicyBuilderCallbacks, LbPolicyCallbacks,
-            LbState, PickResult, Picker, QueuingPicker, SubchannelUpdateFn,
+            child_manager_cb::{ChildManager, ChildUpdate},
+            ChannelControllerCallbacks as ChannelController, LbConfig,
+            LbPolicyBuilderCallbacks as LbPolicyBuilder, LbPolicyCallbacks as LbPolicy, LbState,
+            PickResult, Picker, QueuingPicker, SubchannelUpdateFn,
         },
         name_resolution::{ResolverData, ResolverUpdate},
     },
@@ -21,21 +23,21 @@ use grpc::{
 use crate::*;
 
 #[derive(Clone)]
-pub struct DelegatingPolicyCallbacks {
-    child_manager: ChildManagerCallbacks<Endpoint>,
+pub struct DelegatingPolicy {
+    child_manager: ChildManager<Endpoint>,
 }
 
-impl DelegatingPolicyCallbacks {
+impl DelegatingPolicy {
     pub fn new() -> Self {
         Self {
-            child_manager: ChildManagerCallbacks::<Endpoint>::new(Box::new(|resolver_update| {
+            child_manager: ChildManager::<Endpoint>::new(Box::new(|resolver_update| {
                 let ResolverUpdate::Data(rd) = resolver_update else {
                     return Err("bad update".into());
                 };
                 let mut v = vec![];
                 for endpoint in rd.endpoints {
-                    let child_policy_builder: Box<dyn LbPolicyBuilderCallbacks> =
-                        Box::new(ChildPolicyBuilderCallbacks {});
+                    let child_policy_builder: Box<dyn LbPolicyBuilder> =
+                        Box::new(ChildPolicyBuilder {});
                     let mut rd = ResolverData::default();
                     rd.endpoints.push(endpoint.clone());
                     let child_update = ResolverUpdate::Data(rd);
@@ -52,25 +54,25 @@ impl DelegatingPolicyCallbacks {
 }
 
 fn update_picker(
-    child_manager: &mut ChildManagerCallbacks<Endpoint>,
-    channel_controller: &mut dyn ChannelControllerCallbacks,
+    child_manager: &mut ChildManager<Endpoint>,
+    channel_controller: &mut dyn ChannelController,
 ) {
-    let child_states = child_manager.child_states();
-    let connectivity_states = child_states
-        .iter()
-        .map(|(_, lbstate)| lbstate.connectivity_state);
-    let connectivity_state = effective_state(connectivity_states);
+    let connectivity_states =
+        child_manager.map_child_states(|(_, lbstate)| lbstate.connectivity_state);
+    let connectivity_state = effective_state(connectivity_states.into_iter());
+
     if connectivity_state == ConnectivityState::Ready
         || connectivity_state == ConnectivityState::TransientFailure
     {
-        let children = child_states
-            .into_iter()
-            .filter_map(|(_, lbstate)| {
+        let children = child_manager
+            .map_child_states(|(_, lbstate)| {
                 if lbstate.connectivity_state == connectivity_state {
-                    return Some(lbstate.picker);
+                    return Some(lbstate.picker.clone());
                 }
                 None
             })
+            .into_iter()
+            .flatten()
             .collect();
         channel_controller.update_picker(LbState {
             connectivity_state,
@@ -85,14 +87,14 @@ fn update_picker(
     }
 }
 
-impl LbPolicyCallbacks for DelegatingPolicyCallbacks {
+impl LbPolicy for DelegatingPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
         config: Option<&dyn LbConfig>,
-        channel_controller: &mut dyn ChannelControllerCallbacks,
+        channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut channel_controller = WrappedControllerCallbacks {
+        let mut channel_controller = WrappedController {
             channel_controller,
             child_manager: self.child_manager.clone(),
         };
@@ -107,18 +109,18 @@ impl LbPolicyCallbacks for DelegatingPolicyCallbacks {
 // This is how the channel's controller would be wrapped by a middle LB policy
 // that wants to intercept calls.  This benchmark does not have any specific
 // behavior injected.
-pub struct WrappedControllerCallbacks<'a> {
-    channel_controller: &'a mut dyn ChannelControllerCallbacks,
-    child_manager: ChildManagerCallbacks<Endpoint>,
+pub struct WrappedController<'a> {
+    channel_controller: &'a mut dyn ChannelController,
+    child_manager: ChildManager<Endpoint>,
 }
 
-impl<'a> ChannelControllerCallbacks for WrappedControllerCallbacks<'a> {
+impl<'a> ChannelController for WrappedController<'a> {
     fn new_subchannel(&mut self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel {
         let parent = self.child_manager.clone();
         self.channel_controller.new_subchannel(
             address,
             Box::new(move |subchannel, subchannel_state, channel_controller| {
-                let mut wc: WrappedControllerCallbacks = WrappedControllerCallbacks {
+                let mut wc: WrappedController = WrappedController {
                     channel_controller,
                     child_manager: parent.clone(),
                 };

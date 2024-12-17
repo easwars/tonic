@@ -3,9 +3,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use chi_pol_single::DummyPicker;
 use grpc::client::{
     load_balancing::{
-        LbConfig, LbPolicyBuilderCallbacks, LbPolicyCallbacks, LbPolicyOptions, LbState, Subchannel,
+        LbConfig, LbPolicyBuilderCallbacks as LbPolicyBuilder, LbPolicyCallbacks as LbPolicy,
+        LbPolicyOptions, LbState, Subchannel,
     },
     name_resolution::ResolverUpdate,
     ConnectivityState,
@@ -14,15 +16,15 @@ use grpc::client::{
 use crate::*;
 
 #[derive(Default)]
-pub struct ChildPolicyCallbacks {
+pub struct ChildPolicy {
     scs: Arc<Mutex<HashMap<Subchannel, ConnectivityState>>>,
 }
 
-pub struct ChildPolicyBuilderCallbacks {}
+pub struct ChildPolicyBuilder {}
 
-impl LbPolicyBuilderCallbacks for ChildPolicyBuilderCallbacks {
-    fn build(&self, _options: LbPolicyOptions) -> Box<dyn LbPolicyCallbacks> {
-        Box::new(ChildPolicyCallbacks::default())
+impl LbPolicyBuilder for ChildPolicyBuilder {
+    fn build(&self, _options: LbPolicyOptions) -> Box<dyn LbPolicy> {
+        Box::new(ChildPolicy::default())
     }
 
     fn name(&self) -> &'static str {
@@ -30,7 +32,7 @@ impl LbPolicyBuilderCallbacks for ChildPolicyBuilderCallbacks {
     }
 }
 
-impl LbPolicyCallbacks for ChildPolicyCallbacks {
+impl LbPolicy for ChildPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,

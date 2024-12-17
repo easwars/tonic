@@ -11,11 +11,12 @@ use std::{
     sync::atomic::{AtomicU32, AtomicUsize},
 };
 
+use super::chi_pol_single::ChildPolicyBuilder;
 use grpc::client::{
     load_balancing::{
-        child_manager::{ChildManager, ChildUpdate},
-        ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState, Pick,
-        PickResult, Picker, QueuingPicker, SubchannelUpdate, WorkScheduler,
+        child_manager_single::{ChildManager, ChildUpdate},
+        ChannelController, LbConfig, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicySingle,
+        LbState, Pick, PickResult, Picker, QueuingPicker, SubchannelUpdate, WorkScheduler,
     },
     name_resolution::{Address, ResolverData, ResolverUpdate},
 };
@@ -35,7 +36,7 @@ impl DelegatingPolicy {
                 };
                 let mut v = vec![];
                 for endpoint in rd.endpoints {
-                    let child_policy_builder: Box<dyn LbPolicyBuilder> =
+                    let child_policy_builder: Box<dyn LbPolicyBuilderSingle> =
                         Box::new(ChildPolicyBuilder {});
                     let mut rd = ResolverData::default();
                     rd.endpoints.push(endpoint.clone());
@@ -84,7 +85,7 @@ impl DelegatingPolicy {
     }
 }
 
-impl LbPolicy for DelegatingPolicy {
+impl LbPolicySingle for DelegatingPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,

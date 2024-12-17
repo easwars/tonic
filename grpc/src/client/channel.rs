@@ -16,8 +16,8 @@ use crate::rt;
 use crate::service::{Request, Response};
 
 use super::load_balancing::{
-    self, pick_first, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbPolicyRegistry, LbState,
-    Subchannel, SubchannelState, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
+    self, pick_first, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicyRegistry, LbPolicySingle,
+    LbState, Subchannel, SubchannelState, SubchannelUpdate, WorkScheduler, GLOBAL_LB_REGISTRY,
 };
 use super::name_resolution::{
     self, Address, ResolverBuilder, ResolverOptions, ResolverRegistry, ResolverUpdate,
@@ -314,8 +314,8 @@ impl load_balancing::ChannelController for InternalChannelController {
 
 // A channel that is not idle (connecting, ready, or erroring).
 pub(super) struct GracefulSwitchBalancer {
-    policy: Mutex<Option<Box<dyn LbPolicy>>>,
-    policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilder>>>,
+    policy: Mutex<Option<Box<dyn LbPolicySingle>>>,
+    policy_builder: Mutex<Option<Arc<dyn LbPolicyBuilderSingle>>>,
     work_scheduler: WorkQueueTx,
     pending: Mutex<bool>,
 }

@@ -16,16 +16,16 @@ use crate::{
 };
 
 use super::{
-    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, Pick, PickResult,
-    Picker, Subchannel, SubchannelState, WorkScheduler,
+    ChannelController, LbConfig, LbPolicyBuilderSingle, LbPolicyOptions, LbPolicySingle, Pick,
+    PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
 };
 
 pub static POLICY_NAME: &str = "pick_first";
 
 struct Builder {}
 
-impl LbPolicyBuilder for Builder {
-    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy> {
+impl LbPolicyBuilderSingle for Builder {
+    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicySingle> {
         Box::new(PickFirstPolicy {
             work_scheduler: options.work_scheduler,
             subchannels: vec![],
@@ -48,7 +48,7 @@ struct PickFirstPolicy {
     next_addresses: Arc<Mutex<Vec<Address>>>,
 }
 
-impl LbPolicy for PickFirstPolicy {
+impl LbPolicySingle for PickFirstPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,

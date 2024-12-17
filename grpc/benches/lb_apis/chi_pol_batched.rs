@@ -3,8 +3,8 @@ use std::{borrow::BorrowMut, collections::HashMap};
 use grpc::{
     client::{
         load_balancing::{
-            ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbState, PickResult, Picker,
-            Subchannel, SubchannelState,
+            ChannelController, LbConfig, LbPolicyBatched, LbPolicyBuilderBatched, LbState,
+            PickResult, Picker, Subchannel, SubchannelState,
         },
         name_resolution::ResolverUpdate,
         ConnectivityState,
@@ -16,8 +16,11 @@ use crate::*;
 
 pub struct ChildPolicyBuilder {}
 
-impl LbPolicyBuilder for ChildPolicyBuilder {
-    fn build(&self, _options: grpc::client::load_balancing::LbPolicyOptions) -> Box<dyn LbPolicy> {
+impl LbPolicyBuilderBatched for ChildPolicyBuilder {
+    fn build(
+        &self,
+        _options: grpc::client::load_balancing::LbPolicyOptions,
+    ) -> Box<dyn LbPolicyBatched> {
         Box::new(ChildPolicy::default())
     }
 
@@ -31,7 +34,7 @@ struct ChildPolicy {
     scs: HashMap<Subchannel, ConnectivityState>,
 }
 
-impl LbPolicy for ChildPolicy {
+impl LbPolicyBatched for ChildPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
@@ -51,14 +54,15 @@ impl LbPolicy for ChildPolicy {
 
     fn subchannel_update(
         &mut self,
-        subchannel: &Subchannel,
-        state: &SubchannelState,
+        update: &SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     ) {
-        let Some(e) = self.scs.get_mut(subchannel) else {
-            return;
-        };
-        *e = state.connectivity_state;
+        for (subchannel, new_state) in update.iter() {
+            let Some(state) = self.scs.get_mut(&subchannel) else {
+                continue;
+            };
+            *state = new_state.connectivity_state;
+        }
 
         let picker = Arc::new(DummyPicker {});
         channel_controller.update_picker(LbState {

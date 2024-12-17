@@ -1,0 +1,29 @@
+With 100 endpoints, 10 addrs per endpoint, 3 subchannels per update:
+
+running 3 tests
+test callbacks ... bench:       3,895 ns/iter (+/- 76)
+test single    ... bench:       4,679 ns/iter (+/- 291)
+test batched   ... bench:       2,084 ns/iter (+/- 123)
+
+
+
+With 200 endpoints, 20 addrs per endpoint, 1 subchannel per update:
+
+test callbacks ... bench:       2,439 ns/iter (+/- 44)
+test single    ... bench:       2,711 ns/iter (+/- 87)
+test batched   ... bench:       2,741 ns/iter (+/- 113)
+
+
+
+With 200 endpoints, 20 addrs per endpoint, 20 subchannels per update:
+
+test callbacks ... bench:      48,869 ns/iter (+/- 832)
+test single    ... bench:      52,929 ns/iter (+/- 1,265)
+test batched   ... bench:      13,665 ns/iter (+/- 163)
+
+
+
+- Batched is surely not worth doing for performance, but may be worth doing
+  _for safety_, to prevent runaway problems.
+
+

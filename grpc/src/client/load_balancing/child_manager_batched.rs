@@ -8,8 +8,9 @@ use std::{
 };
 
 use super::{
-    ChannelController, LbConfig, LbPolicy, LbPolicyBuilder, LbPolicyOptions, LbState,
-    SubchannelUpdate, WorkScheduler,
+    ChannelController, LbConfig, LbPolicyBatched as LbPolicy,
+    LbPolicyBuilderBatched as LbPolicyBuilder, LbPolicyOptions, LbState, SubchannelUpdate,
+    WorkScheduler,
 };
 use crate::client::name_resolution::{Address, ResolverData, ResolverUpdate};
 
@@ -164,15 +165,16 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
 
     fn subchannel_update(
         &mut self,
-        subchannel: &Subchannel,
-        state: &SubchannelState,
+        update: &SubchannelUpdate,
         channel_controller: &mut dyn ChannelController,
     ) {
-        let child_idx = *self.subchannel_child_map.get(subchannel).unwrap();
-        let policy = &mut self.children[child_idx].policy;
-        let mut channel_controller = WrappedController::new(channel_controller);
-        policy.subchannel_update(subchannel, state, &mut channel_controller);
-        self.resolve_child_controller(channel_controller, child_idx);
+        for (subchannel, state) in update.states.iter() {
+            let child_idx = *self.subchannel_child_map.get(&subchannel).unwrap();
+            let policy = &mut self.children[child_idx].policy;
+            let mut channel_controller = WrappedController::new(channel_controller);
+            policy.subchannel_update(update, &mut channel_controller);
+            self.resolve_child_controller(channel_controller, child_idx);
+        }
     }
 
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {

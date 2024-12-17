@@ -19,8 +19,9 @@ use super::{
     ConnectivityState,
 };
 
-pub mod child_manager;
+pub mod child_manager_batched;
 pub mod child_manager_cb;
+pub mod child_manager_single;
 pub mod pick_first;
 
 mod registry;
@@ -49,17 +50,6 @@ pub struct LbPolicyOptions {
     pub work_scheduler: Arc<dyn WorkScheduler>,
 }
 
-/// An LB policy factory
-pub trait LbPolicyBuilder: Send + Sync {
-    /// Builds an LB policy instance, or returns an error.
-    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicy>;
-    /// Reports the name of the LB Policy.
-    fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<&dyn LbConfig> {
-        None
-    }
-}
-
 pub trait WorkScheduler: Send + Sync {
     // Schedules a call into the LbPolicy's work method.  If there is already a
     // pending work call that has not yet started, this may not schedule another
@@ -67,7 +57,18 @@ pub trait WorkScheduler: Send + Sync {
     fn schedule_work(&self);
 }
 
-pub trait LbPolicy: Send {
+/// An LB policy factory
+pub trait LbPolicyBuilderSingle: Send + Sync {
+    /// Builds an LB policy instance, or returns an error.
+    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicySingle>;
+    /// Reports the name of the LB Policy.
+    fn name(&self) -> &'static str;
+    fn parse_config(&self, config: &str) -> Option<&dyn LbConfig> {
+        None
+    }
+}
+
+pub trait LbPolicySingle: Send {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
@@ -76,15 +77,45 @@ pub trait LbPolicy: Send {
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
     fn subchannel_update(
         &mut self,
-        update: &Subchannel,
+        subchannel: &Subchannel,
         state: &SubchannelState,
         channel_controller: &mut dyn ChannelController,
     );
     fn work(&mut self, channel_controller: &mut dyn ChannelController);
 }
 
-pub struct SubchannelUpdate {
-    pub(crate) states: HashMap<u32, SubchannelState>,
+/// An LB policy factory
+pub trait LbPolicyBuilderBatched: Send + Sync {
+    /// Builds an LB policy instance, or returns an error.
+    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicyBatched>;
+    /// Reports the name of the LB Policy.
+    fn name(&self) -> &'static str;
+    fn parse_config(&self, config: &str) -> Option<&dyn LbConfig> {
+        None
+    }
+}
+
+pub trait LbPolicyBatched: Send {
+    fn resolver_update(
+        &mut self,
+        update: ResolverUpdate,
+        config: Option<&dyn LbConfig>,
+        channel_controller: &mut dyn ChannelController,
+    ) -> Result<(), Box<dyn Error + Send + Sync>>;
+    fn subchannel_update(
+        &mut self,
+        update: &SubchannelUpdate,
+        channel_controller: &mut dyn ChannelController,
+    );
+    fn work(&mut self, channel_controller: &mut dyn ChannelController);
+}
+
+/// Controls channel behaviors.
+pub trait ChannelController: Send + Sync {
+    /// Creates a new subchannel in IDLE state.
+    fn new_subchannel(&mut self, address: &Address) -> Subchannel;
+    fn update_picker(&mut self, update: LbState);
+    fn request_resolution(&mut self);
 }
 
 #[derive(Clone)]
@@ -95,7 +126,11 @@ pub struct SubchannelState {
     // Set if connectivity state is TransientFailure to describe the failure.
     pub last_connection_error: Option<Arc<dyn Error + Send + Sync>>,
 }
-/*
+
+pub struct SubchannelUpdate {
+    pub states: HashMap<Subchannel, SubchannelState>,
+}
+
 impl SubchannelUpdate {
     pub fn new() -> Self {
         Self {
@@ -108,10 +143,16 @@ impl SubchannelUpdate {
         }
     }
     pub fn get(&self, subchannel: &Subchannel) -> Option<&SubchannelState> {
-        self.states.get(&subchannel.id)
+        self.states.get(subchannel)
     }
     pub fn set(&mut self, subchannel: &Subchannel, state: SubchannelState) {
-        self.states.insert(subchannel.id, state);
+        self.states.insert(subchannel.clone(), state);
+    }
+    pub fn into_iter(self) -> impl Iterator<Item = (Subchannel, SubchannelState)> {
+        self.states.into_iter()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&Subchannel, &SubchannelState)> {
+        self.states.iter()
     }
 }
 
@@ -122,7 +163,7 @@ impl Default for SubchannelUpdate {
         }
     }
 }
-*/
+
 pub trait LbConfig: Send {
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
@@ -168,14 +209,6 @@ pub struct Pick {
     pub subchannel: Subchannel,
     pub on_complete: Option<Box<dyn Fn(&Response) + Send + Sync>>,
     pub metadata: Option<MetadataMap>, // to be added to existing outgoing metadata
-}
-
-/// Controls channel behaviors.
-pub trait ChannelController: Send + Sync {
-    /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(&mut self, address: &Address) -> Subchannel;
-    fn update_picker(&mut self, update: LbState);
-    fn request_resolution(&mut self);
 }
 
 /// A Subchannel represents a method of communicating with an address which may
