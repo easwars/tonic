@@ -147,6 +147,7 @@ impl PickResult {
 }
 
 /// Data provided by the LB policy.
+#[derive(Clone)]
 pub struct LbState {
     pub connectivity_state: super::ConnectivityState,
     pub picker: Arc<dyn Picker>,
@@ -255,9 +256,8 @@ pub trait LbPolicyCallbacks: Send {
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
-type SubchannelUpdateFn<'a> = Box<
-    dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync + 'a,
->;
+pub type SubchannelUpdateFn =
+    Box<dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync>;
 
 pub trait ChannelControllerCallbacks: Send {
     /// Creates a new subchannel in IDLE state.

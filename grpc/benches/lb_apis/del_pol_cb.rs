@@ -11,7 +11,7 @@ use grpc::{
         load_balancing::{
             child_manager_cb::{ChildManagerCallbacks, ChildUpdate},
             ChannelControllerCallbacks, LbConfig, LbPolicyBuilderCallbacks, LbPolicyCallbacks,
-            LbState, PickResult, Picker, QueuingPicker,
+            LbState, PickResult, Picker, QueuingPicker, SubchannelUpdateFn,
         },
         name_resolution::{ResolverData, ResolverUpdate},
     },
@@ -20,6 +20,7 @@ use grpc::{
 
 use crate::*;
 
+#[derive(Clone)]
 pub struct DelegatingPolicyCallbacks {
     child_manager: ChildManagerCallbacks<Endpoint>,
 }
@@ -48,36 +49,47 @@ impl DelegatingPolicyCallbacks {
             })),
         }
     }
+}
 
-    fn update_picker(&mut self, channel_controller: &mut dyn ChannelControllerCallbacks) {
-        let connectivity_states = self
-            .child_manager
-            .child_states()
-            .map(|(_, lbstate)| lbstate.connectivity_state);
-        let connectivity_state = effective_state(connectivity_states);
-        if connectivity_state == ConnectivityState::Ready
-            || connectivity_state == ConnectivityState::TransientFailure
-        {
-            let children = self
-                .child_manager
-                .child_states()
-                .filter_map(|(_, lbstate)| {
-                    if lbstate.connectivity_state == connectivity_state {
-                        return Some(lbstate.picker.clone());
-                    }
-                    None
-                })
-                .collect();
-            channel_controller.update_picker(LbState {
-                connectivity_state,
-                picker: Arc::new(RRPickerPicker::new(children)),
-            });
-        } else {
-            channel_controller.update_picker(LbState {
-                connectivity_state,
-                picker: Arc::new(QueuingPicker {}),
-            });
-        }
+fn update_picker(
+    child_manager: &mut ChildManagerCallbacks<Endpoint>,
+    channel_controller: &mut dyn ChannelControllerCallbacks,
+) {
+    let child_states = child_manager.child_states();
+    /*println!(
+        "updating picker: {:?}",
+        child_states
+            .iter()
+            .map(|v| v.1.connectivity_state)
+            .collect::<Vec<_>>()
+    );*/
+    let connectivity_states = child_states
+        .iter()
+        .map(|(_, lbstate)| lbstate.connectivity_state);
+    let connectivity_state = effective_state(connectivity_states);
+    if connectivity_state == ConnectivityState::Ready
+        || connectivity_state == ConnectivityState::TransientFailure
+    {
+        //println!("{:?} - complex picker", connectivity_state);
+        let children = child_states
+            .iter()
+            .filter_map(|(_, lbstate)| {
+                if lbstate.connectivity_state == connectivity_state {
+                    return Some(lbstate.picker.clone());
+                }
+                None
+            })
+            .collect();
+        channel_controller.update_picker(LbState {
+            connectivity_state,
+            picker: Arc::new(RRPickerPicker::new(children)),
+        });
+    } else {
+        //println!("{:?} - simple picker", connectivity_state);
+        channel_controller.update_picker(LbState {
+            connectivity_state,
+            picker: Arc::new(QueuingPicker {}),
+        });
     }
 }
 
@@ -88,10 +100,14 @@ impl LbPolicyCallbacks for DelegatingPolicyCallbacks {
         config: Option<&dyn LbConfig>,
         channel_controller: &mut dyn ChannelControllerCallbacks,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut channel_controller = WrappedControllerCallbacks {
+            channel_controller,
+            child_manager: self.child_manager.clone(),
+        };
         let _ = self
             .child_manager
-            .resolver_update(update, config, channel_controller)?;
-        self.update_picker(channel_controller);
+            .resolver_update(update, config, &mut channel_controller)?;
+        update_picker(&mut self.child_manager, &mut channel_controller);
         Ok(())
     }
 }
@@ -101,38 +117,32 @@ impl LbPolicyCallbacks for DelegatingPolicyCallbacks {
 // behavior injected.
 pub struct WrappedControllerCallbacks<'a> {
     channel_controller: &'a mut dyn ChannelControllerCallbacks,
-    children: Arc<Mutex<Vec<(Box<dyn LbPolicyCallbacks>, LbState)>>>,
-    idx: usize,
+    child_manager: ChildManagerCallbacks<Endpoint>,
 }
 
 impl<'a> ChannelControllerCallbacks for WrappedControllerCallbacks<'a> {
-    fn new_subchannel(
-        &mut self,
-        address: &Address,
-        updates: Box<
-            dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync,
-        >,
-    ) -> Subchannel {
-        let children = self.children.clone();
-        let idx = self.idx;
+    fn new_subchannel(&mut self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel {
+        let parent = self.child_manager.clone();
         self.channel_controller.new_subchannel(
             address,
             Box::new(move |subchannel, subchannel_state, channel_controller| {
-                let mut wc = WrappedControllerCallbacks {
+                /*println!(
+                    "got wrapped sc update in del policy: {:?}",
+                    subchannel_state.connectivity_state
+                );*/
+                let mut wc: WrappedControllerCallbacks = WrappedControllerCallbacks {
                     channel_controller,
-                    children: children.clone(),
-                    idx,
+                    child_manager: parent.clone(),
                 };
                 updates(subchannel, subchannel_state, &mut wc);
+                update_picker(&mut parent.clone(), channel_controller);
             }),
         )
     }
 
-    fn update_picker(&mut self, update: LbState) {
-        let mut children = self.children.lock().unwrap();
-        let child = &mut children[self.idx];
-        child.1 = update;
-        //update_picker(children, self.channel_controller)
+    fn update_picker(&mut self, _: LbState) {
+        // Child manager will never ask to update the picker.  Instead we always
+        // update the picker after any call into a child.
     }
 
     fn request_resolution(&mut self) {

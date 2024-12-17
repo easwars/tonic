@@ -52,17 +52,17 @@ impl DelegatingPolicy {
     }
 
     fn update_picker(&mut self, channel_controller: &mut dyn ChannelController) {
-        let connectivity_states = self
-            .child_manager
-            .child_states()
+        let child_states = self.child_manager.child_states().collect::<Vec<_>>();
+        let connectivity_states = child_states
+            .iter()
             .map(|(_, lbstate)| lbstate.connectivity_state);
         let connectivity_state = effective_state(connectivity_states);
         if connectivity_state == ConnectivityState::Ready
             || connectivity_state == ConnectivityState::TransientFailure
         {
-            let children = self
-                .child_manager
-                .child_states()
+            //println!("{:?} - complex picker", connectivity_state);
+            let children = child_states
+                .iter()
                 .filter_map(|(_, lbstate)| {
                     if lbstate.connectivity_state == connectivity_state {
                         return Some(lbstate.picker.clone());
@@ -75,6 +75,7 @@ impl DelegatingPolicy {
                 picker: Arc::new(RRPickerPicker::new(children)),
             });
         } else {
+            //println!("{:?} - simple picker", connectivity_state);
             channel_controller.update_picker(LbState {
                 connectivity_state,
                 picker: Arc::new(QueuingPicker {}),

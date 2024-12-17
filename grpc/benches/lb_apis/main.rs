@@ -8,7 +8,7 @@ use tokio::sync::mpsc::channel;
 use grpc::client::{
     load_balancing::{
         ChannelController, ChannelControllerCallbacks, LbPolicy, LbPolicyCallbacks, Subchannel,
-        SubchannelState, SubchannelUpdate,
+        SubchannelState, SubchannelUpdate, SubchannelUpdateFn,
     },
     name_resolution::{Address, Endpoint, ResolverData, ResolverUpdate},
     ConnectivityState,
@@ -124,36 +124,37 @@ fn callbacks(bench: &mut Bencher) {
 
     bench.iter(|| {
         // Update random subchannels to a random state.
-        for _ in 0..NUM_SUBCHANNELS_PER_UPDATE {
-            let connectivity_state = thread_rng().gen_range(0..4);
-            let connectivity_state = match connectivity_state {
-                0 => ConnectivityState::Idle,
-                1 => ConnectivityState::Connecting,
-                2 => ConnectivityState::Ready,
-                _ => ConnectivityState::TransientFailure,
-            };
-            channel_controller.send_update(
-                thread_rng().gen_range(0..num_subchannels),
-                connectivity_state,
-            );
-        }
+        //for _ in 0..NUM_SUBCHANNELS_PER_UPDATE {
+        let connectivity_state = thread_rng().gen_range(0..4);
+        let connectivity_state = match connectivity_state {
+            0 => ConnectivityState::Idle,
+            1 => ConnectivityState::Connecting,
+            2 => ConnectivityState::Ready,
+            _ => ConnectivityState::TransientFailure,
+        };
+        channel_controller.send_update(
+            thread_rng().gen_range(0..num_subchannels),
+            connectivity_state,
+        );
+        //}
     });
 }
 
-pub struct StubChannelControllerCallbacks {
+pub struct StubChannelControllerCallbacks<'a> {
     pub subchannels: Vec<
         Arc<(
             Subchannel,
             Box<
                 dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks)
                     + Send
-                    + Sync,
+                    + Sync
+                    + 'a,
             >,
         )>,
     >,
 }
 
-impl StubChannelControllerCallbacks {
+impl<'a> StubChannelControllerCallbacks<'a> {
     pub fn new() -> Self {
         Self {
             subchannels: vec![],
@@ -161,7 +162,7 @@ impl StubChannelControllerCallbacks {
     }
 }
 
-impl StubChannelControllerCallbacks {
+impl<'a> StubChannelControllerCallbacks<'a> {
     fn send_update(&mut self, n: usize, connectivity_state: ConnectivityState) {
         let x = self.subchannels[n].clone();
         x.1(
@@ -175,14 +176,8 @@ impl StubChannelControllerCallbacks {
     }
 }
 
-impl ChannelControllerCallbacks for StubChannelControllerCallbacks {
-    fn new_subchannel(
-        &mut self,
-        _: &Address,
-        updates: Box<
-            dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync,
-        >,
-    ) -> Subchannel {
+impl<'a> ChannelControllerCallbacks for StubChannelControllerCallbacks<'a> {
+    fn new_subchannel(&mut self, _: &Address, updates: SubchannelUpdateFn) -> Subchannel {
         // Just return a new, empty subchannel, ignoring the address and connect
         // notifications.
         let sc = Subchannel::new(Arc::default());
