@@ -19,6 +19,7 @@ use grpc::{
     },
     service::Request,
 };
+use tonic::transport::channel;
 
 use crate::*;
 
@@ -28,63 +29,63 @@ pub struct DelegatingPolicy {
 }
 
 impl DelegatingPolicy {
-    pub fn new() -> Self {
+    pub fn new(channel_controller: Arc<dyn ChannelController>) -> Self {
         Self {
-            child_manager: ChildManager::<Endpoint>::new(Box::new(|resolver_update| {
-                let ResolverUpdate::Data(rd) = resolver_update else {
-                    return Err("bad update".into());
-                };
-                let mut v = vec![];
-                for endpoint in rd.endpoints {
-                    let child_policy_builder: Box<dyn LbPolicyBuilder> =
-                        Box::new(ChildPolicyBuilder {});
-                    let mut rd = ResolverData::default();
-                    rd.endpoints.push(endpoint.clone());
-                    let child_update = ResolverUpdate::Data(rd);
-                    v.push(ChildUpdate {
-                        child_identifier: endpoint,
-                        child_policy_builder,
-                        child_update,
-                    });
-                }
-                Ok(Box::new(v.into_iter()))
-            })),
+            child_manager: ChildManager::<Endpoint>::new(
+                Box::new(|resolver_update| {
+                    let ResolverUpdate::Data(rd) = resolver_update else {
+                        return Err("bad update".into());
+                    };
+                    let mut v = vec![];
+                    for endpoint in rd.endpoints {
+                        let child_policy_builder: Box<dyn LbPolicyBuilder> =
+                            Box::new(ChildPolicyBuilder {});
+                        let mut rd = ResolverData::default();
+                        rd.endpoints.push(endpoint.clone());
+                        let child_update = ResolverUpdate::Data(rd);
+                        v.push(ChildUpdate {
+                            child_identifier: endpoint,
+                            child_policy_builder,
+                            child_update,
+                        });
+                    }
+                    Ok(Box::new(v.into_iter()))
+                }),
+                Box::new(|child_states, channel_controller| {
+                    let child_states = child_states
+                        .iter()
+                        .map(|child| child.state.lock().unwrap())
+                        .collect::<Vec<_>>();
+                    let connectivity_states =
+                        child_states.iter().map(|state| state.connectivity_state);
+                    let connectivity_state = effective_state(connectivity_states.into_iter());
+                    if connectivity_state == ConnectivityState::Ready
+                        || connectivity_state == ConnectivityState::TransientFailure
+                    {
+                        let children = child_states
+                            .into_iter()
+                            .map(|lbstate| {
+                                if lbstate.connectivity_state == connectivity_state {
+                                    return Some(lbstate.picker.clone());
+                                }
+                                None
+                            })
+                            .flatten()
+                            .collect();
+                        channel_controller.update_picker(LbState {
+                            connectivity_state,
+                            picker: Arc::new(RRPickerPicker::new(children)),
+                        });
+                    } else {
+                        channel_controller.update_picker(LbState {
+                            connectivity_state,
+                            picker: Arc::new(QueuingPicker {}),
+                        });
+                    }
+                }),
+                channel_controller,
+            ),
         }
-    }
-}
-
-fn update_picker(
-    child_manager: &mut ChildManager<Endpoint>,
-    channel_controller: &mut dyn ChannelController,
-) {
-    let connectivity_states =
-        child_manager.map_child_states(|(_, lbstate)| lbstate.lock().unwrap().connectivity_state);
-    let connectivity_state = effective_state(connectivity_states.into_iter());
-
-    if connectivity_state == ConnectivityState::Ready
-        || connectivity_state == ConnectivityState::TransientFailure
-    {
-        let children = child_manager
-            .map_child_states(|(_, lbstate)| {
-                let lbstate = lbstate.lock().unwrap();
-                if lbstate.connectivity_state == connectivity_state {
-                    return Some(lbstate.picker.clone());
-                }
-                None
-            })
-            .into_iter()
-            .flatten()
-            .collect();
-        channel_controller.update_picker(LbState {
-            connectivity_state,
-            picker: Arc::new(RRPickerPicker::new(children)),
-        });
-    } else {
-        //println!("{:?} - simple picker", connectivity_state);
-        channel_controller.update_picker(LbState {
-            connectivity_state,
-            picker: Arc::new(QueuingPicker {}),
-        });
     }
 }
 
@@ -93,50 +94,27 @@ impl LbPolicy for DelegatingPolicy {
         &mut self,
         update: ResolverUpdate,
         config: Option<&dyn LbConfig>,
-        channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut channel_controller = WrappedController {
-            channel_controller,
-            child_manager: self.child_manager.clone(),
-        };
-        let _ = self
-            .child_manager
-            .resolver_update(update, config, &mut channel_controller)?;
-        update_picker(&mut self.child_manager, &mut channel_controller);
-        Ok(())
+        self.child_manager.resolver_update(update, config)
     }
 }
 
 // This is how the channel's controller would be wrapped by a middle LB policy
 // that wants to intercept calls.  This benchmark does not have any specific
 // behavior injected.
-pub struct WrappedController<'a> {
-    channel_controller: &'a mut dyn ChannelController,
-    child_manager: ChildManager<Endpoint>,
+pub struct WrappedController {
+    channel_controller: Arc<dyn ChannelController>,
+    parent: ChildManager<Endpoint>,
 }
 
-impl<'a> ChannelController for WrappedController<'a> {
-    fn new_subchannel(&mut self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel {
-        let parent = self.child_manager.clone();
-        self.channel_controller.new_subchannel(
-            address,
-            Box::new(move |subchannel, subchannel_state, channel_controller| {
-                let mut wc: WrappedController = WrappedController {
-                    channel_controller,
-                    child_manager: parent.clone(),
-                };
-                updates(subchannel, subchannel_state, &mut wc);
-                update_picker(&mut parent.clone(), channel_controller);
-            }),
-        )
+impl ChannelController for WrappedController {
+    fn new_subchannel(&self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel {
+        self.channel_controller.new_subchannel(address, updates)
     }
 
-    fn update_picker(&mut self, _: LbState) {
-        // Child manager will never ask to update the picker.  Instead we always
-        // update the picker after any call into a child.
-    }
+    fn update_picker(&self, _: LbState) {}
 
-    fn request_resolution(&mut self) {
+    fn request_resolution(&self) {
         self.channel_controller.request_resolution();
     }
 }

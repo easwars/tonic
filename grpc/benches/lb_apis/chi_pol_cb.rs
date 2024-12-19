@@ -3,28 +3,35 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use chi_pol_single::DummyPicker;
 use grpc::client::{
     load_balancing::{
-        LbConfig, LbPolicyBuilderCallbacks as LbPolicyBuilder, LbPolicyCallbacks as LbPolicy,
+        ChannelControllerCallbacks as ChannelController, LbConfig,
+        LbPolicyBuilderCallbacks as LbPolicyBuilder, LbPolicyCallbacks as LbPolicy,
         LbPolicyOptions, LbState, Subchannel,
     },
     name_resolution::ResolverUpdate,
     ConnectivityState,
 };
 
-use crate::*;
+use crate::{chi_pol_single::DummyPicker, effective_state};
 
-#[derive(Default)]
 pub struct ChildPolicy {
+    channel_controller: Arc<dyn ChannelController>,
     scs: Arc<Mutex<HashMap<Subchannel, ConnectivityState>>>,
 }
 
 pub struct ChildPolicyBuilder {}
 
 impl LbPolicyBuilder for ChildPolicyBuilder {
-    fn build(&self, _options: LbPolicyOptions) -> Box<dyn LbPolicy> {
-        Box::new(ChildPolicy::default())
+    fn build(
+        &self,
+        _options: LbPolicyOptions,
+        channel_controller: Arc<dyn ChannelController>,
+    ) -> Box<dyn LbPolicy> {
+        Box::new(ChildPolicy {
+            channel_controller,
+            scs: Arc::default(),
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -37,16 +44,16 @@ impl LbPolicy for ChildPolicy {
         &mut self,
         update: ResolverUpdate,
         _: Option<&dyn LbConfig>,
-        channel_controller: &mut dyn ChannelControllerCallbacks,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ResolverUpdate::Data(rd) = update else {
             return Err("bad update".into());
         };
         for address in &rd.endpoints[0].addresses {
             let scmap = self.scs.clone();
-            let subchannel = channel_controller.new_subchannel(
+            let channel_controller = self.channel_controller.clone();
+            let subchannel = self.channel_controller.new_subchannel(
                 &address,
-                Box::new(move |subchannel, state, channel_controller| {
+                Box::new(move |subchannel, state| {
                     let mut m = scmap.lock().unwrap();
                     let Some(e) = m.get_mut(&subchannel) else {
                         return;

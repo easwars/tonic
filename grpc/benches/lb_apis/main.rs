@@ -3,7 +3,10 @@
 use bencher::{benchmark_group, benchmark_main, Bencher};
 use del_pol_single::DelegatingPolicy;
 use rand::prelude::*;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::mpsc::channel;
 
 use grpc::client::{
@@ -27,7 +30,7 @@ mod del_pol_single;
 
 static NUM_ENDPOINTS: i32 = 200;
 static NUM_ADDRS_PER_ENDPOINT: i32 = 20;
-static NUM_SUBCHANNELS_PER_UPDATE: i32 = 1;
+static NUM_SUBCHANNELS_PER_UPDATE: i32 = 20;
 
 fn single(bench: &mut Bencher) {
     let mut lb = DelegatingPolicy::new();
@@ -147,7 +150,8 @@ impl ChannelController for StubChannelController {
 }
 
 fn callbacks(bench: &mut Bencher) {
-    let mut lb = del_pol_cb::DelegatingPolicy::new();
+    let channel_controller = Arc::new(StubChannelControllerCallbacks::new());
+    let mut lb = del_pol_cb::DelegatingPolicy::new(channel_controller.clone());
 
     // Create the ResolverData containing many endpoints and addresses.
     let mut rd = ResolverData::default();
@@ -161,9 +165,8 @@ fn callbacks(bench: &mut Bencher) {
         }
         rd.endpoints.push(endpoint);
     }
-    let mut channel_controller = StubChannelControllerCallbacks::new();
-    let _ = lb.resolver_update(ResolverUpdate::Data(rd), None, &mut channel_controller);
-    let num_subchannels = channel_controller.subchannels.len();
+    let _ = lb.resolver_update(ResolverUpdate::Data(rd), None);
+    let num_subchannels = channel_controller.subchannels.lock().unwrap().len();
 
     bench.iter(|| {
         // Update random subchannels to a random state.
@@ -183,56 +186,48 @@ fn callbacks(bench: &mut Bencher) {
     });
 }
 
-pub struct StubChannelControllerCallbacks<'a> {
-    pub subchannels: Vec<
-        Arc<(
-            Subchannel,
-            Box<
-                dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks)
-                    + Send
-                    + Sync
-                    + 'a,
-            >,
-        )>,
-    >,
+pub struct StubChannelControllerCallbacks {
+    pub subchannels: Mutex<Vec<Arc<(Subchannel, SubchannelUpdateFn)>>>,
 }
 
-impl<'a> StubChannelControllerCallbacks<'a> {
+impl StubChannelControllerCallbacks {
     pub fn new() -> Self {
         Self {
-            subchannels: vec![],
+            subchannels: Mutex::default(),
         }
     }
 }
 
-impl<'a> StubChannelControllerCallbacks<'a> {
-    fn send_update(&mut self, n: usize, connectivity_state: ConnectivityState) {
-        let x = self.subchannels[n].clone();
+impl StubChannelControllerCallbacks {
+    fn send_update(&self, n: usize, connectivity_state: ConnectivityState) {
+        let x = self.subchannels.lock().unwrap()[n].clone();
         x.1(
             x.0.clone(),
             SubchannelState {
                 connectivity_state,
                 last_connection_error: None,
             },
-            self,
         );
     }
 }
 
-impl<'a> ChannelControllerCallbacks for StubChannelControllerCallbacks<'a> {
-    fn new_subchannel(&mut self, _: &Address, updates: SubchannelUpdateFn) -> Subchannel {
+impl ChannelControllerCallbacks for StubChannelControllerCallbacks {
+    fn new_subchannel(&self, _: &Address, updates: SubchannelUpdateFn) -> Subchannel {
         // Just return a new, empty subchannel, ignoring the address and connect
         // notifications.
         let sc = Subchannel::new(Arc::default());
-        self.subchannels.push(Arc::new((sc.clone(), updates)));
+        self.subchannels
+            .lock()
+            .unwrap()
+            .push(Arc::new((sc.clone(), updates)));
         sc
     }
 
-    fn update_picker(&mut self, _: grpc::client::load_balancing::LbState) {
+    fn update_picker(&self, _: grpc::client::load_balancing::LbState) {
         // Do nothing with the update.
     }
 
-    fn request_resolution(&mut self) {
+    fn request_resolution(&self) {
         // No resolver to notify.
     }
 }

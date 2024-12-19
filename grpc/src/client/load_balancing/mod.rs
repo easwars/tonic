@@ -272,7 +272,11 @@ impl Eq for Subchannel {}
 
 pub trait LbPolicyBuilderCallbacks: Send {
     /// Builds an LB policy instance, or returns an error.
-    fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicyCallbacks>;
+    fn build(
+        &self,
+        options: LbPolicyOptions,
+        channel_controller: Arc<dyn ChannelControllerCallbacks>,
+    ) -> Box<dyn LbPolicyCallbacks>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
     fn parse_config(&self, config: &str) -> Option<Box<dyn LbConfig>> {
@@ -285,18 +289,19 @@ pub trait LbPolicyCallbacks: Send {
         &mut self,
         update: ResolverUpdate,
         config: Option<&dyn LbConfig>,
-        channel_controller: &mut dyn ChannelControllerCallbacks,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
-pub type SubchannelUpdateFn =
-    Box<dyn Fn(Subchannel, SubchannelState, &mut dyn ChannelControllerCallbacks) + Send + Sync>;
+pub type SubchannelUpdateFn = Box<dyn Fn(Subchannel, SubchannelState) + Send + Sync>;
 
-pub trait ChannelControllerCallbacks: Send {
+// May only be used at synchronization points -- when called from the work
+// scheduler or in a call to resolver_update or the SubchannelUpdateFn on a
+// subchannel.
+pub trait ChannelControllerCallbacks: Send + Sync {
     /// Creates a new subchannel in IDLE state.
-    fn new_subchannel(&mut self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel;
-    fn update_picker(&mut self, update: LbState);
-    fn request_resolution(&mut self);
+    fn new_subchannel(&self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel;
+    fn update_picker(&self, update: LbState);
+    fn request_resolution(&self);
 }
 
 pub struct QueuingPicker {}
