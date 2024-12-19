@@ -25,9 +25,9 @@ mod del_pol_batched;
 mod del_pol_cb;
 mod del_pol_single;
 
-static NUM_ENDPOINTS: i32 = 100;
-static NUM_ADDRS_PER_ENDPOINT: i32 = 10;
-static NUM_SUBCHANNELS_PER_UPDATE: i32 = 3;
+static NUM_ENDPOINTS: i32 = 200;
+static NUM_ADDRS_PER_ENDPOINT: i32 = 20;
+static NUM_SUBCHANNELS_PER_UPDATE: i32 = 1;
 
 fn single(bench: &mut Bencher) {
     let mut lb = DelegatingPolicy::new();

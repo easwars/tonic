@@ -58,7 +58,7 @@ fn update_picker(
     channel_controller: &mut dyn ChannelController,
 ) {
     let connectivity_states =
-        child_manager.map_child_states(|(_, lbstate)| lbstate.connectivity_state);
+        child_manager.map_child_states(|(_, lbstate)| lbstate.lock().unwrap().connectivity_state);
     let connectivity_state = effective_state(connectivity_states.into_iter());
 
     if connectivity_state == ConnectivityState::Ready
@@ -66,6 +66,7 @@ fn update_picker(
     {
         let children = child_manager
             .map_child_states(|(_, lbstate)| {
+                let lbstate = lbstate.lock().unwrap();
                 if lbstate.connectivity_state == connectivity_state {
                     return Some(lbstate.picker.clone());
                 }

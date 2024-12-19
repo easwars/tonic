@@ -28,30 +28,14 @@ pub struct ChildManager<T: Clone> {
 }
 
 struct Inner<T> {
-    subchannel_child_map: HashMap<Subchannel, usize>,
     children: Vec<Child<T>>,
     shard_update: Box<ResolverUpdateSharder<T>>,
-}
-
-impl<T: Clone> Inner<T> {
-    fn resolve_child_controller(
-        &mut self,
-        channel_controller: WrappedControllerCallbacks<T>,
-        child_idx: usize,
-    ) {
-        for csc in channel_controller.created_subchannels {
-            self.subchannel_child_map.insert(csc, child_idx);
-        }
-        if let Some(state) = channel_controller.picker_update {
-            self.children[child_idx].state = state;
-        };
-    }
 }
 
 struct Child<T> {
     identifier: T,
     policy: Box<dyn LbPolicy>,
-    state: LbState,
+    state: Arc<Mutex<LbState>>,
 }
 
 pub struct ChildUpdate<T> {
@@ -71,7 +55,6 @@ impl<T: Clone + PartialEq + Hash + Eq> ChildManager<T> {
         // Need: access last picker updates, probably just have user call a method to get.
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                subchannel_child_map: HashMap::default(),
                 children: Vec::default(),
                 shard_update,
             })),
@@ -81,7 +64,7 @@ impl<T: Clone + PartialEq + Hash + Eq> ChildManager<T> {
     // Returns all children that have produced a state update.
     // ChannelControllerCallbacks is a parameter to enforce correct usage, but
     // is not used.
-    pub fn child_states(&mut self) -> Vec<(T, LbState)> {
+    pub fn child_states(&mut self) -> Vec<(T, Arc<Mutex<LbState>>)> {
         self.inner
             .lock()
             .unwrap()
@@ -91,7 +74,10 @@ impl<T: Clone + PartialEq + Hash + Eq> ChildManager<T> {
             .collect()
     }
 
-    pub fn map_child_states<V>(&mut self, f: impl FnMut((&T, &LbState)) -> V) -> Vec<V> {
+    pub fn map_child_states<V>(
+        &mut self,
+        f: impl FnMut((&T, &Arc<Mutex<LbState>>)) -> V,
+    ) -> Vec<V> {
         self.inner
             .lock()
             .unwrap()
@@ -119,21 +105,6 @@ impl<T: Clone + PartialEq + Hash + Eq + Send + 'static> LbPolicy for ChildManage
         let mut old_children = vec![];
         mem::swap(&mut inner.children, &mut old_children);
 
-        // Replace the subchannel map with an empty map.
-        let mut old_subchannel_child_map = HashMap::new();
-        mem::swap(
-            &mut inner.subchannel_child_map,
-            &mut old_subchannel_child_map,
-        );
-        // Reverse the subchannel map.
-        let mut old_child_subchannels_map: HashMap<usize, Vec<Subchannel>> = HashMap::new();
-        for (subchannel, child_idx) in old_subchannel_child_map {
-            old_child_subchannels_map
-                .entry(child_idx)
-                .or_insert_with(|| vec![])
-                .push(subchannel);
-        }
-
         // Hash the old children for efficient lookups.
         let old_children = old_children
             .into_iter()
@@ -152,13 +123,6 @@ impl<T: Clone + PartialEq + Hash + Eq + Send + 'static> LbPolicy for ChildManage
         // subchannel map.
         for (new_idx, (identifier, builder)) in ids_builders.into_iter().enumerate() {
             if let Some((policy, state, old_idx)) = old_children.remove(&identifier) {
-                for subchannel in old_child_subchannels_map
-                    .remove(&old_idx)
-                    .into_iter()
-                    .flatten()
-                {
-                    inner.subchannel_child_map.insert(subchannel, new_idx);
-                }
                 inner.children.push(Child {
                     identifier,
                     state,
@@ -168,7 +132,7 @@ impl<T: Clone + PartialEq + Hash + Eq + Send + 'static> LbPolicy for ChildManage
                 let policy = builder.build(LbPolicyOptions {
                     work_scheduler: Arc::new(NopWorkScheduler {}), /* TODO */
                 });
-                let state = LbState::initial();
+                let state = Arc::new(Mutex::new(LbState::initial()));
                 inner.children.push(Child {
                     identifier,
                     state,
@@ -181,57 +145,50 @@ impl<T: Clone + PartialEq + Hash + Eq + Send + 'static> LbPolicy for ChildManage
         // Call resolver_update on all children.
         let mut updates = updates.into_iter();
         for child_idx in 0..inner.children.len() {
+            let child_state = inner.children[child_idx].state.clone();
             let policy = &mut inner.children[child_idx].policy;
             let child_update = updates.next().unwrap();
-            let mut channel_controller: WrappedControllerCallbacks<'_, T> =
-                WrappedControllerCallbacks::new(channel_controller, self.clone());
+            let mut channel_controller =
+                WrappedControllerCallbacks::new(channel_controller, child_state);
             let _ = policy.resolver_update(child_update, config, &mut channel_controller);
-            inner.resolve_child_controller(channel_controller, child_idx);
         }
         Ok(())
     }
 }
 
-pub struct WrappedControllerCallbacks<'a, T: Clone> {
+pub struct WrappedControllerCallbacks<'a> {
     channel_controller: &'a mut dyn ChannelController,
-    created_subchannels: Vec<Subchannel>,
-    picker_update: Option<LbState>,
-    parent: ChildManager<T>,
+    parent_lb_state_for_child: Arc<Mutex<LbState>>,
 }
 
-impl<'a, T: Clone + Send> WrappedControllerCallbacks<'a, T> {
-    fn new(channel_controller: &'a mut dyn ChannelController, parent: ChildManager<T>) -> Self {
+impl<'a> WrappedControllerCallbacks<'a> {
+    fn new(
+        channel_controller: &'a mut dyn ChannelController,
+        parent_lb_state_for_child: Arc<Mutex<LbState>>,
+    ) -> Self {
         Self {
             channel_controller,
-            created_subchannels: vec![],
-            picker_update: None,
-            parent,
+            parent_lb_state_for_child,
         }
     }
 }
 
-impl<'a, T: Clone + Send + 'static> ChannelController for WrappedControllerCallbacks<'a, T> {
+impl<'a> ChannelController for WrappedControllerCallbacks<'a> {
     fn new_subchannel(&mut self, address: &Address, updates: SubchannelUpdateFn) -> Subchannel {
-        let parent = self.parent.clone();
+        let plsfc = self.parent_lb_state_for_child.clone();
         let subchannel = self.channel_controller.new_subchannel(
             address,
             Box::new(move |subchannel, subchannel_state, channel_controller| {
-                let mut inner = parent.inner.lock().unwrap();
-                let Some(&child_idx) = inner.subchannel_child_map.get(&subchannel) else {
-                    return;
-                };
-                let mut channel_controller: WrappedControllerCallbacks<'_, T> =
-                    WrappedControllerCallbacks::new(channel_controller, parent.clone());
+                let mut channel_controller =
+                    WrappedControllerCallbacks::new(channel_controller, plsfc.clone());
                 updates(subchannel, subchannel_state, &mut channel_controller);
-                inner.resolve_child_controller(channel_controller, child_idx);
             }),
         );
-        self.created_subchannels.push(subchannel.clone());
         subchannel
     }
 
     fn update_picker(&mut self, update: LbState) {
-        self.picker_update = Some(update);
+        *self.parent_lb_state_for_child.lock().unwrap() = update;
     }
 
     fn request_resolution(&mut self) {
