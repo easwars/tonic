@@ -80,7 +80,7 @@ impl<T: PartialEq + Hash + Eq + Send> LbPolicy for ChildManager<T> {
     fn resolver_update(
         &mut self,
         resolver_update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // First determine if the incoming update is valid.

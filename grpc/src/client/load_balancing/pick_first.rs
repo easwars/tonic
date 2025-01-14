@@ -29,7 +29,7 @@ impl LbPolicyBuilderSingle for Builder {
         Box::new(PickFirstPolicy {
             work_scheduler: options.work_scheduler,
             subchannels: vec![],
-            next_addresses: Arc::default(),
+            next_addresses: Vec::default(),
         })
     }
 
@@ -45,14 +45,14 @@ pub fn reg() {
 struct PickFirstPolicy {
     work_scheduler: Arc<dyn WorkScheduler>,
     subchannels: Vec<Subchannel>,
-    next_addresses: Arc<Mutex<Vec<Address>>>,
+    next_addresses: Vec<Address>,
 }
 
 impl LbPolicySingle for PickFirstPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let ResolverUpdate::Data(update) = update else {
@@ -72,7 +72,7 @@ impl LbPolicySingle for PickFirstPolicy {
         self.subchannels = vec![sc.clone()];
         sc.connect();
 
-        *self.next_addresses.lock().unwrap() = addresses;
+        self.next_addresses = addresses;
         let work_scheduler = self.work_scheduler.clone();
         // TODO: Implement Drop that cancels this task.
         tokio::task::spawn(async move {
@@ -105,13 +105,9 @@ impl LbPolicySingle for PickFirstPolicy {
     }
 
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {
-        let mut work_items = self.next_addresses.lock().unwrap();
+        println!("Called with {:?}", self.next_addresses);
 
-        work_items
-            .iter()
-            .for_each(|v| println!("Called with {}", v));
-
-        if let Some(address) = work_items.pop() {
+        if let Some(address) = self.next_addresses.pop() {
             self.subchannels
                 .push(channel_controller.new_subchannel(&address));
         }

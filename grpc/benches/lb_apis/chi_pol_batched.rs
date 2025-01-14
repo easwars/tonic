@@ -38,7 +38,7 @@ impl LbPolicyBatched for ChildPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        _: Option<&dyn LbConfig>,
+        _: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ResolverUpdate::Data(rd) = update else {

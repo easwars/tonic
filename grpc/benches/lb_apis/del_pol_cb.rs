@@ -93,7 +93,7 @@ impl LbPolicy for DelegatingPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.child_manager.resolver_update(update, config)
     }

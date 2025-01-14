@@ -77,7 +77,7 @@ impl<T: Clone + PartialEq + Hash + Eq + Send + 'static> LbPolicy for ChildManage
     fn resolver_update(
         &mut self,
         resolver_update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut inner = self.inner.lock().unwrap();
         // First determine if the incoming update is valid.

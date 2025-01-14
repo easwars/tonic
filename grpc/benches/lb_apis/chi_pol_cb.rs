@@ -43,7 +43,7 @@ impl LbPolicy for ChildPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        _: Option<&dyn LbConfig>,
+        _: Option<&LbConfig>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let ResolverUpdate::Data(rd) = update else {
             return Err("bad update".into());

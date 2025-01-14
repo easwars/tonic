@@ -382,7 +382,7 @@ impl GracefulSwitchBalancer {
 
         p.as_mut()
             .unwrap()
-            .resolver_update(update, config, controller)
+            .resolver_update(update, config.as_ref(), controller)
 
         // TODO: close old LB policy gracefully vs. drop?
     }

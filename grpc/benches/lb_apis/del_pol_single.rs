@@ -89,7 +89,7 @@ impl LbPolicySingle for DelegatingPolicy {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let _ = self

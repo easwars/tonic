@@ -20,6 +20,7 @@ use super::{
 };
 
 pub mod child_manager_batched;
+pub mod child_manager_broadcast;
 pub mod child_manager_cb;
 pub mod child_manager_single;
 pub mod pick_first;
@@ -63,7 +64,7 @@ pub trait LbPolicyBuilderSingle: Send + Sync {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicySingle>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<&dyn LbConfig> {
+    fn parse_config(&self, config: &str) -> Option<LbConfig> {
         None
     }
 }
@@ -72,7 +73,7 @@ pub trait LbPolicySingle: Send {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
     fn subchannel_update(
@@ -90,7 +91,7 @@ pub trait LbPolicyBuilderBatched: Send + Sync {
     fn build(&self, options: LbPolicyOptions) -> Box<dyn LbPolicyBatched>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<&dyn LbConfig> {
+    fn parse_config(&self, config: &str) -> Option<LbConfig> {
         None
     }
 }
@@ -99,7 +100,7 @@ pub trait LbPolicyBatched: Send {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
         channel_controller: &mut dyn ChannelController,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
     fn subchannel_update(
@@ -164,8 +165,19 @@ impl Default for SubchannelUpdate {
     }
 }
 
-pub trait LbConfig: Send {
-    fn into_any(self: Box<Self>) -> Box<dyn Any>;
+pub struct LbConfig {
+    config: Arc<dyn Any>,
+}
+
+impl<'a> LbConfig {
+    fn new(config: Arc<dyn Any>) -> Self {
+        LbConfig { config }
+    }
+
+    fn into<T: 'static>(&self) -> Option<&T> {
+        let s = self.config.downcast_ref::<T>();
+        None
+    }
 }
 
 pub trait Picker: Send + Sync {
@@ -279,7 +291,7 @@ pub trait LbPolicyBuilderCallbacks: Send {
     ) -> Box<dyn LbPolicyCallbacks>;
     /// Reports the name of the LB Policy.
     fn name(&self) -> &'static str;
-    fn parse_config(&self, config: &str) -> Option<Box<dyn LbConfig>> {
+    fn parse_config(&self, config: &str) -> Option<LbConfig> {
         None
     }
 }
@@ -288,7 +300,7 @@ pub trait LbPolicyCallbacks: Send {
     fn resolver_update(
         &mut self,
         update: ResolverUpdate,
-        config: Option<&dyn LbConfig>,
+        config: Option<&LbConfig>,
     ) -> Result<(), Box<dyn Error + Send + Sync>>;
 }
 
