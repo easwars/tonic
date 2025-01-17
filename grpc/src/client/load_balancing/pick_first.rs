@@ -20,6 +20,12 @@ use super::{
     PickResult, Picker, Subchannel, SubchannelState, WorkScheduler,
 };
 
+use serde::{Deserialize, Serialize};
+use serde_json;
+
+use rand::seq::SliceRandom;
+use rand;
+
 pub static POLICY_NAME: &str = "pick_first";
 
 struct Builder {}
@@ -36,6 +42,29 @@ impl LbPolicyBuilderSingle for Builder {
     fn name(&self) -> &'static str {
         POLICY_NAME
     }
+
+    fn parse_config(&self, config: &str) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
+        println!("parse_config called with {config}");
+        let cfg = match serde_json::from_str::<LbPolicyConfig>(config) {
+            Ok(cfg) => {
+                println!("parsed JSON successfully into struct {:?}", cfg);
+                cfg
+            },
+            Err(err) => {
+                println!("failed to parse JSON {:?}", err);
+                return Err(format!("service config parsing failed: {err}").into());
+            }
+        };
+        let cfg = LbConfig::new(Arc::new(cfg));
+        Ok(Some(cfg))
+    }
+}
+
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct LbPolicyConfig {
+    shuffle_address_list: bool,
 }
 
 pub fn reg() {
@@ -58,6 +87,14 @@ impl LbPolicySingle for PickFirstPolicy {
         let ResolverUpdate::Data(update) = update else {
             return Err("unhandled".into());
         };
+
+        let mut shuffle_addresses = false;
+        if let Some(cfg) = config{
+            let cfg: &LbPolicyConfig = cfg.into().unwrap();
+            println!("received lb policy config {:?}", cfg);
+            shuffle_addresses = cfg.shuffle_address_list;
+        }
+
         //let endpoints = mem::replace(&mut update.endpoints, vec![]);
         let mut addresses = update
             .endpoints
@@ -65,6 +102,11 @@ impl LbPolicySingle for PickFirstPolicy {
             .next()
             .ok_or("no endpoints")?
             .addresses;
+        if shuffle_addresses {
+            let mut rng = rand::thread_rng();
+            addresses.shuffle(&mut rng);
+            println!("Shuffled the address list");
+        }
 
         let address = addresses.pop().ok_or("no addresses")?;
 
