@@ -44,14 +44,9 @@ impl LbPolicyBuilderSingle for Builder {
     }
 
     fn parse_config(&self, config: &str) -> Result<Option<LbConfig>, Box<dyn Error + Send + Sync>> {
-        println!("parse_config called with {config}");
         let cfg = match serde_json::from_str::<LbPolicyConfig>(config) {
-            Ok(cfg) => {
-                println!("parsed JSON successfully into struct {:?}", cfg);
-                cfg
-            },
+            Ok(cfg) => cfg,
             Err(err) => {
-                println!("failed to parse JSON {:?}", err);
                 return Err(format!("service config parsing failed: {err}").into());
             }
         };
@@ -89,9 +84,8 @@ impl LbPolicySingle for PickFirstPolicy {
         };
 
         let mut shuffle_addresses = false;
-        if let Some(cfg) = config{
+        if let Some(cfg) = config {
             let cfg: &LbPolicyConfig = cfg.into().unwrap();
-            println!("received lb policy config {:?}", cfg);
             shuffle_addresses = cfg.shuffle_address_list;
         }
 
@@ -105,7 +99,6 @@ impl LbPolicySingle for PickFirstPolicy {
         if shuffle_addresses {
             let mut rng = rand::thread_rng();
             addresses.shuffle(&mut rng);
-            println!("Shuffled the address list");
         }
 
         let address = addresses.pop().ok_or("no addresses")?;
@@ -147,8 +140,6 @@ impl LbPolicySingle for PickFirstPolicy {
     }
 
     fn work(&mut self, channel_controller: &mut dyn ChannelController) {
-        println!("Called with {:?}", self.next_addresses);
-
         if let Some(address) = self.next_addresses.pop() {
             self.subchannels
                 .push(channel_controller.new_subchannel(&address));
